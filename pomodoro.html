@@ -1,0 +1,339 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>番茄闹钟</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+      background: #1a1a2e;
+      color: #eee;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+    }
+
+    h1 { font-size: 1.6rem; letter-spacing: 4px; margin-bottom: 32px; color: #ff6b6b; }
+
+    /* Mode tabs */
+    .tabs {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 36px;
+    }
+    .tab {
+      padding: 8px 20px;
+      border-radius: 20px;
+      border: 2px solid #444;
+      background: transparent;
+      color: #aaa;
+      cursor: pointer;
+      font-size: 0.85rem;
+      transition: all 0.2s;
+    }
+    .tab.active {
+      background: #ff6b6b;
+      border-color: #ff6b6b;
+      color: #fff;
+    }
+    .tab:hover:not(.active) { border-color: #ff6b6b; color: #ff6b6b; }
+
+    /* Circle timer */
+    .timer-wrap {
+      position: relative;
+      width: 260px;
+      height: 260px;
+      margin-bottom: 36px;
+    }
+    .timer-wrap svg {
+      transform: rotate(-90deg);
+    }
+    .ring-bg { fill: none; stroke: #2d2d4e; stroke-width: 10; }
+    .ring-fg {
+      fill: none;
+      stroke: #ff6b6b;
+      stroke-width: 10;
+      stroke-linecap: round;
+      transition: stroke-dashoffset 1s linear, stroke 0.4s;
+    }
+    .timer-label {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 4px;
+    }
+    .timer-label .time {
+      font-size: 3.4rem;
+      font-weight: 700;
+      letter-spacing: 2px;
+      color: #fff;
+    }
+    .timer-label .mode-text {
+      font-size: 0.8rem;
+      color: #aaa;
+      letter-spacing: 2px;
+    }
+
+    /* Controls */
+    .controls { display: flex; gap: 16px; align-items: center; margin-bottom: 36px; }
+    .btn-main {
+      width: 72px; height: 72px;
+      border-radius: 50%;
+      border: none;
+      background: #ff6b6b;
+      color: #fff;
+      font-size: 1.6rem;
+      cursor: pointer;
+      transition: transform 0.15s, background 0.2s;
+      box-shadow: 0 4px 16px rgba(255,107,107,0.35);
+    }
+    .btn-main:hover { background: #ff5252; transform: scale(1.06); }
+    .btn-main:active { transform: scale(0.96); }
+
+    .btn-icon {
+      width: 48px; height: 48px;
+      border-radius: 50%;
+      border: 2px solid #444;
+      background: transparent;
+      color: #aaa;
+      font-size: 1.1rem;
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+    .btn-icon:hover { border-color: #ff6b6b; color: #ff6b6b; }
+
+    /* Pomodoro count */
+    .pomodoros {
+      display: flex;
+      gap: 10px;
+      margin-bottom: 24px;
+    }
+    .tomato { font-size: 1.5rem; opacity: 0.25; transition: opacity 0.3s; }
+    .tomato.done { opacity: 1; }
+
+    /* Stats */
+    .stats {
+      font-size: 0.78rem;
+      color: #666;
+      letter-spacing: 1px;
+    }
+
+    /* Notification toast */
+    .toast {
+      position: fixed;
+      bottom: 32px;
+      left: 50%;
+      transform: translateX(-50%) translateY(80px);
+      background: #ff6b6b;
+      color: #fff;
+      padding: 12px 28px;
+      border-radius: 24px;
+      font-size: 0.9rem;
+      transition: transform 0.35s ease;
+      pointer-events: none;
+    }
+    .toast.show { transform: translateX(-50%) translateY(0); }
+  </style>
+</head>
+<body>
+
+<h1>🍅 番茄闹钟</h1>
+
+<div class="tabs">
+  <button class="tab active" data-mode="work" data-minutes="25">专注 25</button>
+  <button class="tab" data-mode="short" data-minutes="5">短休息 5</button>
+  <button class="tab" data-mode="long" data-minutes="15">长休息 15</button>
+</div>
+
+<div class="timer-wrap">
+  <svg width="260" height="260" viewBox="0 0 260 260">
+    <circle class="ring-bg" cx="130" cy="130" r="115" />
+    <circle class="ring-fg" id="ring" cx="130" cy="130" r="115" />
+  </svg>
+  <div class="timer-label">
+    <div class="time" id="display">25:00</div>
+    <div class="mode-text" id="modeText">专注时间</div>
+  </div>
+</div>
+
+<div class="controls">
+  <button class="btn-icon" id="btnSkip" title="跳过">⏭</button>
+  <button class="btn-main" id="btnStart">▶</button>
+  <button class="btn-icon" id="btnReset" title="重置">↺</button>
+</div>
+
+<div class="pomodoros" id="tomatoes">
+  <span class="tomato" id="t1">🍅</span>
+  <span class="tomato" id="t2">🍅</span>
+  <span class="tomato" id="t3">🍅</span>
+  <span class="tomato" id="t4">🍅</span>
+</div>
+
+<div class="stats" id="stats">今日完成：0 个番茄</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+  const MODES = {
+    work:  { label: '专注时间', minutes: 25, color: '#ff6b6b' },
+    short: { label: '短休息',   minutes: 5,  color: '#48cae4' },
+    long:  { label: '长休息',   minutes: 15, color: '#06d6a0' },
+  };
+
+  const CIRC = 2 * Math.PI * 115;
+  const ring = document.getElementById('ring');
+  ring.style.strokeDasharray = CIRC;
+
+  let mode = 'work';
+  let totalSeconds = 25 * 60;
+  let remaining = totalSeconds;
+  let running = false;
+  let timer = null;
+  let completed = 0;   // pomodoros this session
+  let cycleCount = 0;  // for triggering long break after 4
+
+  const display  = document.getElementById('display');
+  const modeText = document.getElementById('modeText');
+  const btnStart = document.getElementById('btnStart');
+  const toast    = document.getElementById('toast');
+  const stats    = document.getElementById('stats');
+
+  function fmt(s) {
+    const m = Math.floor(s / 60).toString().padStart(2, '0');
+    const sec = (s % 60).toString().padStart(2, '0');
+    return `${m}:${sec}`;
+  }
+
+  function setRing(ratio) {
+    ring.style.strokeDashoffset = CIRC * (1 - ratio);
+  }
+
+  function render() {
+    display.textContent = fmt(remaining);
+    setRing(remaining / totalSeconds);
+  }
+
+  function applyMode(m, customMinutes) {
+    mode = m;
+    const cfg = MODES[m];
+    const mins = customMinutes ?? cfg.minutes;
+    totalSeconds = mins * 60;
+    remaining = totalSeconds;
+    ring.style.stroke = cfg.color;
+    modeText.textContent = cfg.label;
+    document.querySelectorAll('.tab').forEach(t => {
+      t.classList.toggle('active', t.dataset.mode === m);
+    });
+    render();
+    stop();
+  }
+
+  function stop() {
+    running = false;
+    clearInterval(timer);
+    btnStart.textContent = '▶';
+  }
+
+  function start() {
+    running = true;
+    btnStart.textContent = '⏸';
+    timer = setInterval(tick, 1000);
+  }
+
+  function tick() {
+    remaining--;
+    render();
+    if (remaining <= 0) {
+      stop();
+      onFinish();
+    }
+  }
+
+  function onFinish() {
+    playBeep();
+    if (mode === 'work') {
+      completed++;
+      cycleCount++;
+      updateTomatoes();
+      stats.textContent = `今日完成：${completed} 个番茄`;
+      showToast('🎉 专注结束！休息一下吧');
+      setTimeout(() => {
+        if (cycleCount % 4 === 0) applyMode('long');
+        else applyMode('short');
+      }, 1500);
+    } else {
+      showToast('⚡ 休息结束，继续专注！');
+      setTimeout(() => applyMode('work'), 1500);
+    }
+  }
+
+  function updateTomatoes() {
+    const idx = ((completed - 1) % 4);
+    document.querySelectorAll('.tomato').forEach((el, i) => {
+      el.classList.toggle('done', i <= idx && completed > 0 && (completed % 4 !== 0 || i < 4));
+    });
+    if (completed % 4 === 0) {
+      setTimeout(() => {
+        document.querySelectorAll('.tomato').forEach(el => el.classList.remove('done'));
+      }, 400);
+    }
+  }
+
+  function showToast(msg) {
+    toast.textContent = msg;
+    toast.classList.add('show');
+    setTimeout(() => toast.classList.remove('show'), 3000);
+  }
+
+  function playBeep() {
+    try {
+      const ctx = new (window.AudioContext || window.webkitAudioContext)();
+      [0, 0.3, 0.6].forEach(t => {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.frequency.value = 880;
+        gain.gain.setValueAtTime(0.3, ctx.currentTime + t);
+        gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + t + 0.25);
+        osc.start(ctx.currentTime + t);
+        osc.stop(ctx.currentTime + t + 0.25);
+      });
+    } catch(e) {}
+  }
+
+  btnStart.addEventListener('click', () => {
+    if (running) stop(); else start();
+  });
+
+  document.getElementById('btnReset').addEventListener('click', () => {
+    stop();
+    remaining = totalSeconds;
+    render();
+  });
+
+  document.getElementById('btnSkip').addEventListener('click', () => {
+    stop();
+    onFinish();
+  });
+
+  document.querySelectorAll('.tab').forEach(tab => {
+    tab.addEventListener('click', () => {
+      stop();
+      applyMode(tab.dataset.mode, parseInt(tab.dataset.minutes));
+    });
+  });
+
+  // Init
+  applyMode('work');
+</script>
+</body>
+</html>
