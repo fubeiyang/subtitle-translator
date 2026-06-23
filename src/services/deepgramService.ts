@@ -53,6 +53,14 @@ export function createDeepgramService(
   const ws = new WebSocket(url);
   ws.binaryType = 'arraybuffer';
 
+  // ── Connection timeout — trigger error if Deepgram doesn't open in 12 s ───
+  const connectTimer = setTimeout(() => {
+    if (ws.readyState !== WebSocket.OPEN) {
+      ws.close();
+      callbacks.onError('连接超时：无法连接到 Deepgram，请检查网络和代理设置');
+    }
+  }, 12000);
+
   // ── Chunking state ─────────────────────────────────────────────────────────
   let sentBoundary = 0;  // byte-offset in current segment already sent to onFinal
   let currentInterim = '';
@@ -79,6 +87,7 @@ export function createDeepgramService(
 
   // ── WebSocket lifecycle ────────────────────────────────────────────────────
   ws.onopen = () => {
+    clearTimeout(connectTimer);
     console.log('[Deepgram] connected');
     callbacks.onOpen?.();
   };
@@ -139,6 +148,7 @@ export function createDeepgramService(
   };
 
   ws.onclose = (event) => {
+    clearTimeout(connectTimer);
     clearPause();
     console.log(`[Deepgram] closed (${event.code})`);
     callbacks.onClose?.();
@@ -149,6 +159,7 @@ export function createDeepgramService(
       if (ws.readyState === WebSocket.OPEN) ws.send(pcm);
     },
     close() {
+      clearTimeout(connectTimer);
       clearPause();
       if (ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ type: 'CloseStream' }));

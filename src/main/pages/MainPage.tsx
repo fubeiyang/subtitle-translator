@@ -33,6 +33,8 @@ export default function MainPage() {
   const pendingFinalRef = useRef<string | null>(null);
   // Tracks the EN text currently shown in overlay so stale translations are discarded
   const latestEnRef = useRef('');
+  // Ref mirror of isRunning so callbacks don't capture stale closure values
+  const isRunningRef = useRef(false);
 
   useEffect(() => { loadSettings().catch(console.error); }, []);
 
@@ -81,6 +83,7 @@ export default function MainPage() {
       const audio = createAudioCapture();
       const dg = createDeepgramService(settings.deepgramApiKey, sourceLang, {
         onOpen() {
+          isRunningRef.current = true;
           setStatus('live');
           setIsRunning(true);
           window.electronAPI.showOverlay();
@@ -109,13 +112,20 @@ export default function MainPage() {
 
         onError(err) {
           console.error('[Deepgram]', err);
+          const msg = typeof err === 'string' ? err : 'Deepgram 连接失败，请检查 API Key 和网络';
+          setErrorMsg(msg);
           setStatus('error');
-          setErrorMsg('Deepgram 连接失败，请检查 API Key 和网络');
           stop();
         },
 
         onClose() {
-          if (isRunning) setStatus('idle');
+          // Use ref to avoid stale React closure — isRunning state would always
+          // read false here because the callback was created before setIsRunning(true)
+          if (isRunningRef.current) {
+            isRunningRef.current = false;
+            setStatus('idle');
+            setIsRunning(false);
+          }
         },
       });
 
@@ -132,6 +142,7 @@ export default function MainPage() {
 
   const stop = () => {
     cleanup();
+    isRunningRef.current = false;
     setIsRunning(false);
     setStatus('idle');
     setInterimText('');
