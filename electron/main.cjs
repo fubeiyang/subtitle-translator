@@ -125,8 +125,29 @@ function setupAudioCapture() {
   });
 }
 
+// ── Deepgram auth header injection ───────────────────────────────────────────
+// Browser WebSocket cannot set custom headers, so Electron intercepts the
+// outgoing WebSocket upgrade request and injects "Authorization: Token KEY".
+// This avoids the need for the unreliable access_token URL parameter.
+function setupDeepgramAuth() {
+  session.defaultSession.webRequest.onBeforeSendHeaders(
+    { urls: ['wss://api.deepgram.com/*', 'https://api.deepgram.com/*'] },
+    (details, callback) => {
+      const settings = readSettings();
+      const apiKey = settings.deepgramApiKey || '';
+      callback({
+        requestHeaders: {
+          ...details.requestHeaders,
+          Authorization: `Token ${apiKey}`,
+        },
+      });
+    }
+  );
+}
+
 // ── App lifecycle ────────────────────────────────────────────────────────────
 app.whenReady().then(() => {
+  setupDeepgramAuth();
   setupAudioCapture();
   createMainWindow();
   createOverlayWindow();

@@ -29,6 +29,11 @@ export function createDeepgramService(
   language: SourceLanguage,
   callbacks: DeepgramCallbacks
 ): DeepgramService {
+  // Auth is injected by Electron's webRequest.onBeforeSendHeaders in main.cjs
+  // (adds "Authorization: Token KEY" to the WS upgrade request transparently).
+  // The apiKey param is kept for signature compatibility but not used in the URL.
+  void apiKey;
+
   const params = new URLSearchParams({
     model: 'nova-3',           // Latest Nova-3 model (best accuracy + speed)
     language,                  // en / ja / ko / multi (auto-detect)
@@ -40,7 +45,6 @@ export function createDeepgramService(
     vad_events: 'true',        // Voice activity detection events
     endpointing: '380',        // Silence (ms) before treating as sentence end
     utterance_end_ms: '1000',  // Additional silence for final utterance flush
-    access_token: apiKey,      // Auth: URL param (browser WebSocket can't set headers)
   });
 
   const url = `wss://api.deepgram.com/v1/listen?${params.toString()}`;
