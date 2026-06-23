@@ -1,0 +1,33 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+release/
+out/
+
+# Logs
+*.log
+npm-debug.log*
+
+# Screenshots & temp files
+screenshot*.png
+final-screenshot.png
+app-window.png
+*.tmp
+
+# Environment
+.env
+.env.local
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE
+.vscode/
+.idea/
+
+# Claude internal
+.claude/

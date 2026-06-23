@@ -1,0 +1,32 @@
+{
+  "appId": "com.subtitle.translator",
+  "productName": "字幕翻译",
+  "copyright": "Copyright © 2025",
+  "directories": {
+    "output": "release",
+    "buildResources": "assets"
+  },
+  "files": [
+    "dist/**/*",
+    "electron/**/*",
+    "node_modules/**/*",
+    "package.json"
+  ],
+  "win": {
+    "target": [{ "target": "nsis", "arch": ["x64"] }],
+    "icon": "assets/icon.ico"
+  },
+  "nsis": {
+    "oneClick": false,
+    "allowToChangeInstallationDirectory": true,
+    "createDesktopShortcut": true,
+    "installerLanguages": ["zh_CN", "en_US"]
+  },
+  "mac": {
+    "target": [{ "target": "dmg", "arch": ["x64", "arm64"] }],
+    "icon": "assets/icon.icns",
+    "entitlements": "assets/entitlements.plist",
+    "entitlementsInherit": "assets/entitlements.plist",
+    "hardenedRuntime": true
+  }
+}
