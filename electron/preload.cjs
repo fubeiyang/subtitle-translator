@@ -24,6 +24,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   hideOverlay: () => ipcRenderer.send('overlay:hide'),
   toggleOverlay: () => ipcRenderer.send('overlay:toggle'),
 
+  // Translation proxy — routes fetch through main process so it uses system proxy
+  translate: (url) => ipcRenderer.invoke('translate:request', url),
+
   // Frameless window controls
   minimizeWindow: () => ipcRenderer.send('window:minimize'),
   closeWindow: () => ipcRenderer.send('window:close'),

@@ -1,8 +1,9 @@
-// Translation service — Google Translate (free, no key) + optional DeepL
+// Translation service
 //
-// Strategy:
-//   - Default: Google Translate unofficial API — no key required, works instantly
-//   - Optional: DeepL API — higher quality, requires paid/free API key
+// Request chain (in order):
+//   1. Google Translate via Electron main process  — uses system proxy (Clash)
+//   2. Youdao (有道) unofficial API               — China-accessible, no key
+//   3. Google Translate direct fetch               — last resort / dev mode
 
 export type TranslationService = 'google' | 'deepl';
 
@@ -21,45 +22,105 @@ export async function translateToZh(text: string, opts: TranslateOptions): Promi
     if (opts.service === 'deepl' && opts.deeplApiKey) {
       return await translateDeepL(text, from, opts.deeplApiKey);
     }
-    return await translateGoogle(text, from);
+    return await translateWithFallback(text, from);
   } catch (err) {
-    console.warn('[Translate] Failed, returning original:', err);
+    console.warn('[Translate] All services failed, returning original:', err);
     return text;
   }
 }
 
-// ── Google Translate (unofficial, free) ──────────────────────────────────────
-// Uses the same endpoint the Google Translate web page calls.
-// No API key required. Rate limits apply for very high volume.
-async function translateGoogle(text: string, from: string): Promise<string> {
+// ── Fetch helper: try main-process proxy first, then direct ──────────────────
+async function fetchText(url: string): Promise<string> {
+  if (typeof window !== 'undefined' && window.electronAPI?.translate) {
+    return window.electronAPI.translate(url);
+  }
+  // Dev mode fallback (no Electron context)
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.text();
+}
+
+// ── Multi-layer translation with automatic fallback ──────────────────────────
+async function translateWithFallback(text: string, from: string): Promise<string> {
+  // 1. Google via main process (goes through Clash system proxy)
+  try {
+    const result = await translateGoogle(text, from, true);
+    if (result) return result;
+  } catch (e) {
+    console.warn('[Translate] Google (proxy) failed:', e);
+  }
+
+  // 2. Youdao — Chinese service, no proxy needed, no key required
+  try {
+    const result = await translateYoudao(text, from);
+    if (result) return result;
+  } catch (e) {
+    console.warn('[Translate] Youdao failed:', e);
+  }
+
+  // 3. Google direct (works if Clash has global/rule for Google)
+  try {
+    const result = await translateGoogle(text, from, false);
+    if (result) return result;
+  } catch (e) {
+    console.warn('[Translate] Google (direct) failed:', e);
+  }
+
+  return text;
+}
+
+// ── Google Translate (unofficial) ────────────────────────────────────────────
+async function translateGoogle(text: string, from: string, viaMain: boolean): Promise<string> {
   const url =
     `https://translate.googleapis.com/translate_a/single` +
     `?client=gtx&sl=${from}&tl=zh-CN&dt=t&q=${encodeURIComponent(text)}`;
 
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`Google Translate HTTP ${res.status}`);
+  let raw: string;
+  if (viaMain) {
+    raw = await fetchText(url);
+  } else {
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    raw = await res.text();
+  }
 
-  const data = (await res.json()) as unknown[][];
-  // Response structure: [[["translated","original",null,null,10],...],...]
+  const data = JSON.parse(raw) as unknown[][];
   return (data[0] as string[][])
     .map((item) => item[0])
     .filter(Boolean)
     .join('');
 }
 
+// ── Youdao (有道) unofficial — works in China without proxy ──────────────────
+async function translateYoudao(text: string, from: string): Promise<string> {
+  const langMap: Record<string, string> = {
+    en: 'en', ja: 'ja', ko: 'ko', auto: 'auto',
+  };
+  const srcLang = langMap[from] ?? 'auto';
+  const url =
+    `https://dict.youdao.com/translate` +
+    `?i=${encodeURIComponent(text)}&doctype=json&from=${srcLang}&to=zh-CHS`;
+
+  const raw = await fetchText(url);
+  const data = JSON.parse(raw) as {
+    errorCode: number;
+    translateResult: Array<Array<{ tgt: string }>>;
+  };
+
+  if (data.errorCode !== 0) throw new Error(`Youdao error ${data.errorCode}`);
+  return data.translateResult
+    .flat()
+    .map((s) => s.tgt)
+    .join('');
+}
+
 // ── DeepL API ────────────────────────────────────────────────────────────────
-// Free tier: 500,000 chars/month. Sign up at https://www.deepl.com/pro-api
-// Free plan uses api-free.deepl.com; paid uses api.deepl.com
 async function translateDeepL(text: string, from: string, apiKey: string): Promise<string> {
   const isFree = apiKey.endsWith(':fx');
   const base = isFree ? 'https://api-free.deepl.com' : 'https://api.deepl.com';
 
-  // DeepL language codes
   const langMap: Record<string, string> = {
-    en: 'EN',
-    ja: 'JA',
-    ko: 'KO',
-    auto: 'auto',
+    en: 'EN', ja: 'JA', ko: 'KO', auto: 'auto',
   };
   const sourceLang = langMap[from] ?? from.toUpperCase();
 

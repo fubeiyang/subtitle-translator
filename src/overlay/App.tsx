@@ -1,50 +1,51 @@
 // Floating subtitle overlay — always-on-top, transparent, draggable
-// Receives subtitle text via Electron IPC from the main control window
+// Shows English original (small) + Chinese translation (large)
+// Stays visible until next sentence arrives; auto-hides after 6s of silence
 import { useState, useEffect, useRef } from 'react';
 
 interface SubtitlePayload {
-  text: string;
+  en: string;
+  zh: string;
   isInterim: boolean;
 }
 
 export default function OverlayApp() {
-  const [current, setCurrent] = useState<SubtitlePayload>({ text: '', isInterim: false });
+  const [en, setEn] = useState('');
+  const [zh, setZh] = useState('');
   const [visible, setVisible] = useState(false);
-  const fadeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const hideTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
-    const cleanup = window.electronAPI.onSubtitleUpdate((payload) => {
-      if (fadeTimer.current) clearTimeout(fadeTimer.current);
+    const cleanup = window.electronAPI.onSubtitleUpdate((payload: SubtitlePayload) => {
+      // Clear any pending auto-hide
+      if (hideTimer.current) clearTimeout(hideTimer.current);
 
-      if (!payload.text) {
+      // Empty payload = explicit clear (stop button)
+      if (!payload.zh && !payload.en) {
         setVisible(false);
         return;
       }
 
-      setCurrent(payload);
+      // Update text and show — new sentence replaces old one smoothly
+      setEn(payload.en ?? '');
+      setZh(payload.zh ?? '');
       setVisible(true);
 
-      // Auto-hide final subtitles after 4 seconds of no update
-      if (!payload.isInterim) {
-        fadeTimer.current = setTimeout(() => setVisible(false), 4000);
-      }
+      // Auto-hide after 6 seconds of silence (no new sentence)
+      hideTimer.current = setTimeout(() => setVisible(false), 6000);
     });
 
-    return cleanup;
+    return () => {
+      cleanup();
+      if (hideTimer.current) clearTimeout(hideTimer.current);
+    };
   }, []);
 
   return (
-    <div
-      className="overlay-root"
-      // Entire overlay is draggable (via Electron -webkit-app-region: drag)
-      // so the window can be repositioned by dragging anywhere on it
-    >
+    <div className="overlay-root">
       <div className={`subtitle-bar ${visible ? 'subtitle-bar--visible' : ''}`}>
-        <p
-          className={`subtitle-text ${current.isInterim ? 'subtitle-text--interim' : ''}`}
-        >
-          {current.text}
-        </p>
+        {en && <p className="subtitle-en">{en}</p>}
+        {zh && <p className="subtitle-zh">{zh}</p>}
       </div>
     </div>
   );

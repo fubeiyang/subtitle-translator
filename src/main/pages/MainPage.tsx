@@ -1,5 +1,5 @@
 // Main control page — language selector, start/stop button, live status
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useCallback } from 'react';
 import { createAudioCapture, type AudioCapture } from '../../services/audioCapture';
 import {
   createDeepgramService,
@@ -27,12 +27,37 @@ export default function MainPage() {
 
   const audioRef = useRef<AudioCapture | null>(null);
   const deepgramRef = useRef<DeepgramService | null>(null);
-  // Accumulate interim text while Deepgram streams
-  const interimRef = useRef('');
 
-  // Load settings once on mount
+  // Translation queue: one request in flight at a time; pending holds next
+  const translatingRef = useRef(false);
+  const pendingFinalRef = useRef<string | null>(null);
+
   useEffect(() => {
     loadSettings().catch(console.error);
+  }, []);
+
+  // ── Translation with single-inflight queue ───────────────────────────────
+  const doTranslate = useCallback(async (transcript: string, settings: ReturnType<typeof getCachedSettings>) => {
+    translatingRef.current = true;
+    try {
+      const zh = await translateToZh(transcript, {
+        service: settings.translationService,
+        deeplApiKey: settings.deeplApiKey,
+        sourceLang: settings.sourceLanguage,
+      });
+      window.electronAPI.updateSubtitle({ en: transcript, zh, isInterim: false });
+    } catch {
+      // Show original English when translation fails
+      window.electronAPI.updateSubtitle({ en: transcript, zh: transcript, isInterim: false });
+    } finally {
+      translatingRef.current = false;
+      // If a new sentence arrived while we were translating, translate it now
+      if (pendingFinalRef.current !== null) {
+        const next = pendingFinalRef.current;
+        pendingFinalRef.current = null;
+        doTranslate(next, settings);
+      }
+    }
   }, []);
 
   const start = async () => {
@@ -47,10 +72,8 @@ export default function MainPage() {
     setStatus('connecting');
 
     try {
-      // ── Step 1: Capture system audio ────────────────────────────────────
       const audio = createAudioCapture();
 
-      // ── Step 2: Connect to Deepgram WebSocket ───────────────────────────
       const dg = createDeepgramService(settings.deepgramApiKey, sourceLang, {
         onOpen() {
           setStatus('live');
@@ -58,27 +81,20 @@ export default function MainPage() {
           window.electronAPI.showOverlay();
         },
 
+        // Interim: update main-window transcript preview ONLY — never touch overlay
         onInterim(transcript) {
-          interimRef.current = transcript;
           setInterimText(transcript);
-          // Push interim to overlay immediately — no translation yet (too fast)
-          window.electronAPI.updateSubtitle({ text: transcript, isInterim: true });
         },
 
-        async onFinal(transcript) {
-          interimRef.current = '';
+        // speech_final: translate and push to overlay; queue if already translating
+        onFinal(transcript) {
           setInterimText('');
-          // Translate sentence-final result to Chinese
-          try {
-            const zh = await translateToZh(transcript, {
-              service: settings.translationService,
-              deeplApiKey: settings.deeplApiKey,
-              sourceLang: settings.sourceLanguage,
-            });
-            window.electronAPI.updateSubtitle({ text: zh, isInterim: false });
-          } catch {
-            // If translation fails, show original
-            window.electronAPI.updateSubtitle({ text: transcript, isInterim: false });
+          const s = getCachedSettings();
+          if (translatingRef.current) {
+            // Drop older pending, keep only the latest sentence
+            pendingFinalRef.current = transcript;
+          } else {
+            doTranslate(transcript, s);
           }
         },
 
@@ -96,7 +112,6 @@ export default function MainPage() {
 
       deepgramRef.current = dg;
 
-      // ── Step 3: Start streaming audio to Deepgram ───────────────────────
       await audio.start((pcmChunk) => {
         dg.sendAudio(pcmChunk);
       });
@@ -115,9 +130,10 @@ export default function MainPage() {
     setIsRunning(false);
     setStatus('idle');
     setInterimText('');
-    interimRef.current = '';
+    translatingRef.current = false;
+    pendingFinalRef.current = null;
     window.electronAPI.hideOverlay();
-    window.electronAPI.updateSubtitle({ text: '', isInterim: false });
+    window.electronAPI.updateSubtitle({ en: '', zh: '', isInterim: false });
   };
 
   const cleanup = () => {
@@ -136,7 +152,6 @@ export default function MainPage() {
 
   return (
     <div className="main-page">
-      {/* Language selector */}
       <div className="section-label">识别语言 → 中文</div>
       <div className="lang-tabs">
         {LANGUAGES.map(({ code, label, flag }) => (
@@ -152,7 +167,6 @@ export default function MainPage() {
         ))}
       </div>
 
-      {/* Big action button */}
       <button
         className={`action-btn ${isRunning ? 'action-btn--stop' : 'action-btn--start'}`}
         onClick={isRunning ? stop : start}
@@ -167,13 +181,12 @@ export default function MainPage() {
         )}
       </button>
 
-      {/* Status indicator */}
       <div className={`status-badge status-badge--${status}`}>
         <span>{statusInfo.dot}</span>
         <span>{statusInfo.text}</span>
       </div>
 
-      {/* Live transcript preview */}
+      {/* Live transcript preview — interim text shown here, NOT in overlay */}
       {interimText && (
         <div className="transcript-preview">
           <div className="transcript-label">识别中...</div>
@@ -181,7 +194,6 @@ export default function MainPage() {
         </div>
       )}
 
-      {/* Overlay toggle hint */}
       {isRunning && (
         <button className="overlay-toggle-btn" onClick={() => window.electronAPI.toggleOverlay()}>
           显示 / 隐藏 字幕条

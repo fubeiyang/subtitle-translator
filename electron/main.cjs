@@ -1,5 +1,5 @@
 // Electron main process — manages windows, WASAPI loopback, IPC, settings
-const { app, BrowserWindow, ipcMain, desktopCapturer, session, screen } = require('electron');
+const { app, BrowserWindow, ipcMain, desktopCapturer, session, screen, net } = require('electron');
 const path = require('path');
 const fs = require('fs');
 
@@ -188,6 +188,16 @@ ipcMain.handle('get-desktop-sources', async () => {
     fetchWindowIcons: false,
   });
   return sources.map((s) => ({ id: s.id, name: s.name }));
+});
+
+// ── IPC: Translation proxy (renderer fetch → main process → system proxy) ────
+// electron.net.fetch() honours Clash / system proxy; renderer fetch() does not.
+ipcMain.handle('translate:request', async (_event, url) => {
+  const res = await net.fetch(url, {
+    headers: { 'User-Agent': 'Mozilla/5.0' },
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.text();
 });
 
 // ── IPC: Frameless window drag / controls ─────────────────────────────────────

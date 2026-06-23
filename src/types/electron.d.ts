@@ -1,7 +1,8 @@
 // Global type declarations for window.electronAPI (injected by Electron preload)
 
 interface SubtitlePayload {
-  text: string;
+  en: string;
+  zh: string;
   isInterim: boolean;
 }
 
@@ -12,6 +13,9 @@ interface ElectronAPI {
   setSettings: (data: Partial<AppSettings>) => Promise<boolean>;
 
   getDesktopSources: () => Promise<Array<{ id: string; name: string }>>;
+
+  // Translation proxy — routes fetch through main process (uses system proxy)
+  translate: (url: string) => Promise<string>;
 
   updateSubtitle: (payload: SubtitlePayload) => void;
   onSubtitleUpdate: (cb: (payload: SubtitlePayload) => void) => () => void;
