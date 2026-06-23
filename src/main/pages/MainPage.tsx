@@ -86,12 +86,14 @@ export default function MainPage() {
           setInterimText(transcript);
         },
 
-        // speech_final: translate and push to overlay; queue if already translating
+        // speech_final: push English immediately so overlay never has a blank gap,
+        // then translate and update with Chinese when ready
         onFinal(transcript) {
           setInterimText('');
+          // Show English right away — user sees something instantly
+          window.electronAPI.updateSubtitle({ en: transcript, zh: '', isInterim: false });
           const s = getCachedSettings();
           if (translatingRef.current) {
-            // Drop older pending, keep only the latest sentence
             pendingFinalRef.current = transcript;
           } else {
             doTranslate(transcript, s);

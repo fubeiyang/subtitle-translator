@@ -74,9 +74,9 @@ function createOverlayWindow() {
 
   overlayWindow = new BrowserWindow({
     width: 900,
-    height: 130,
+    height: 180,
     x: Math.round((sw - 900) / 2),
-    y: Math.round(sh * 0.78), // 78% down — over video content
+    y: Math.round(sh * 0.76), // 76% down — slightly higher for two-line display
     frame: false,
     transparent: true,
     alwaysOnTop: true,
