@@ -28,16 +28,21 @@ export default function MainPage() {
   const audioRef = useRef<AudioCapture | null>(null);
   const deepgramRef = useRef<DeepgramService | null>(null);
 
-  // Translation queue: one request in flight at a time; pending holds next
+  // Translation queue: one request in-flight, one pending slot
   const translatingRef = useRef(false);
   const pendingFinalRef = useRef<string | null>(null);
+  // Tracks the EN text currently shown in overlay so stale translations are discarded
+  const latestEnRef = useRef('');
 
-  useEffect(() => {
-    loadSettings().catch(console.error);
-  }, []);
+  useEffect(() => { loadSettings().catch(console.error); }, []);
 
-  // ── Translation with single-inflight queue ───────────────────────────────
-  const doTranslate = useCallback(async (transcript: string, settings: ReturnType<typeof getCachedSettings>) => {
+  // ── Translation engine ────────────────────────────────────────────────────
+  // Shows English immediately; fills in Chinese when translation completes.
+  // If a newer EN chunk arrived while translating, the old ZH result is dropped.
+  const doTranslate = useCallback(async (
+    transcript: string,
+    settings: ReturnType<typeof getCachedSettings>
+  ) => {
     translatingRef.current = true;
     try {
       const zh = await translateToZh(transcript, {
@@ -45,17 +50,20 @@ export default function MainPage() {
         deeplApiKey: settings.deeplApiKey,
         sourceLang: settings.sourceLanguage,
       });
-      window.electronAPI.updateSubtitle({ en: transcript, zh, isInterim: false });
+      // Only update if overlay is still showing this English chunk
+      if (latestEnRef.current === transcript) {
+        window.electronAPI.updateSubtitle({ en: transcript, zh, isInterim: false });
+      }
     } catch {
-      // Show original English when translation fails
-      window.electronAPI.updateSubtitle({ en: transcript, zh: transcript, isInterim: false });
+      if (latestEnRef.current === transcript) {
+        window.electronAPI.updateSubtitle({ en: transcript, zh: transcript, isInterim: false });
+      }
     } finally {
       translatingRef.current = false;
-      // If a new sentence arrived while we were translating, translate it now
       if (pendingFinalRef.current !== null) {
         const next = pendingFinalRef.current;
         pendingFinalRef.current = null;
-        doTranslate(next, settings);
+        doTranslate(next, getCachedSettings());
       }
     }
   }, []);
@@ -63,17 +71,14 @@ export default function MainPage() {
   const start = async () => {
     setErrorMsg('');
     const settings = getCachedSettings();
-
     if (!settings.deepgramApiKey) {
       setErrorMsg('请先在设置中填入 Deepgram API Key');
       return;
     }
-
     setStatus('connecting');
 
     try {
       const audio = createAudioCapture();
-
       const dg = createDeepgramService(settings.deepgramApiKey, sourceLang, {
         onOpen() {
           setStatus('live');
@@ -81,17 +86,19 @@ export default function MainPage() {
           window.electronAPI.showOverlay();
         },
 
-        // Interim: update main-window transcript preview ONLY — never touch overlay
+        // Interim: main window "识别中..." preview only — overlay untouched
         onInterim(transcript) {
           setInterimText(transcript);
         },
 
-        // speech_final: push English immediately so overlay never has a blank gap,
-        // then translate and update with Chinese when ready
+        // Final chunk (from punctuation / pause / segment / utterance boundary):
+        //   1. Immediately push English to overlay (zero latency)
+        //   2. Queue translation; discard result if a newer chunk has arrived
         onFinal(transcript) {
           setInterimText('');
-          // Show English right away — user sees something instantly
+          latestEnRef.current = transcript;
           window.electronAPI.updateSubtitle({ en: transcript, zh: '', isInterim: false });
+
           const s = getCachedSettings();
           if (translatingRef.current) {
             pendingFinalRef.current = transcript;
@@ -113,11 +120,7 @@ export default function MainPage() {
       });
 
       deepgramRef.current = dg;
-
-      await audio.start((pcmChunk) => {
-        dg.sendAudio(pcmChunk);
-      });
-
+      await audio.start((pcmChunk) => dg.sendAudio(pcmChunk));
       audioRef.current = audio;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -134,6 +137,7 @@ export default function MainPage() {
     setInterimText('');
     translatingRef.current = false;
     pendingFinalRef.current = null;
+    latestEnRef.current = '';
     window.electronAPI.hideOverlay();
     window.electronAPI.updateSubtitle({ en: '', zh: '', isInterim: false });
   };
@@ -146,10 +150,10 @@ export default function MainPage() {
   };
 
   const statusInfo = {
-    idle: { dot: '', text: '准备就绪' },
+    idle:       { dot: '',   text: '准备就绪' },
     connecting: { dot: '⏳', text: '正在连接...' },
-    live: { dot: '🔴', text: '实时翻译中' },
-    error: { dot: '⚠️', text: errorMsg || '发生错误' },
+    live:       { dot: '🔴', text: '实时翻译中' },
+    error:      { dot: '⚠️', text: errorMsg || '发生错误' },
   }[status];
 
   return (
@@ -174,13 +178,7 @@ export default function MainPage() {
         onClick={isRunning ? stop : start}
         disabled={status === 'connecting'}
       >
-        {status === 'connecting' ? (
-          <span className="spinner" />
-        ) : isRunning ? (
-          '停止翻译'
-        ) : (
-          '开始翻译'
-        )}
+        {status === 'connecting' ? <span className="spinner" /> : isRunning ? '停止翻译' : '开始翻译'}
       </button>
 
       <div className={`status-badge status-badge--${status}`}>
@@ -188,7 +186,7 @@ export default function MainPage() {
         <span>{statusInfo.text}</span>
       </div>
 
-      {/* Live transcript preview — interim text shown here, NOT in overlay */}
+      {/* Interim text shown here — NOT in overlay */}
       {interimText && (
         <div className="transcript-preview">
           <div className="transcript-label">识别中...</div>

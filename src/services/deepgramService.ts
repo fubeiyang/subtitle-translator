@@ -1,12 +1,12 @@
-// Deepgram Nova-3 real-time streaming via WebSocket
+// Deepgram Nova-3 real-time streaming — hybrid chunking strategy
 //
-// Protocol:
-//   1. Open WS to wss://api.deepgram.com/v1/listen with query params
-//   2. Stream raw PCM16 audio ArrayBuffers as binary messages
-//   3. Receive JSON "Results" messages:
-//      - is_final=false  → interim result (still speaking, may change)
-//      - speech_final=true → sentence boundary (safe to translate)
-//   4. Send {"type":"CloseStream"} to flush remaining audio, then close WS
+// Trigger hierarchy (earliest wins, all send to onFinal):
+//   1. Punctuation in new interim content  → immediate
+//   2. 300 ms pause without new words      → debounce flush
+//   3. is_final (segment boundary)         → guaranteed flush
+//   4. speech_final (utterance boundary)   → flush + full reset
+//
+// This ensures continuous speech never stalls — even without natural pauses.
 
 export type SourceLanguage = 'en' | 'ja' | 'ko' | 'multi';
 
@@ -24,35 +24,62 @@ export interface DeepgramService {
   isConnected: () => boolean;
 }
 
+// Punctuation that signals a good translation boundary
+const PUNCT_RE = /[.!?,;:]\s*$/;
+const MIN_CHUNK = 5;   // minimum chars to bother translating
+const PAUSE_MS  = 300; // ms of silence before force-flush
+
 export function createDeepgramService(
   apiKey: string,
   language: SourceLanguage,
   callbacks: DeepgramCallbacks
 ): DeepgramService {
-  // Auth is injected by Electron's webRequest.onBeforeSendHeaders in main.cjs
-  // (adds "Authorization: Token KEY" to the WS upgrade request transparently).
-  // The apiKey param is kept for signature compatibility but not used in the URL.
-  void apiKey;
+  void apiKey; // auth injected by main.cjs webRequest interceptor
 
   const params = new URLSearchParams({
-    model: 'nova-3',           // Latest Nova-3 model (best accuracy + speed)
-    language,                  // en / ja / ko / multi (auto-detect)
-    encoding: 'linear16',      // Raw PCM 16-bit signed integers
-    sample_rate: '16000',      // Must match AudioContext sampleRate
-    channels: '1',             // Mono audio
-    punctuate: 'true',         // Add punctuation automatically
-    interim_results: 'true',   // Stream partial results for low latency
-    vad_events: 'true',        // Voice activity detection events
-    endpointing: '380',        // Silence (ms) before treating as sentence end
-    utterance_end_ms: '1000',  // Additional silence for final utterance flush
+    model: 'nova-3',
+    language,
+    encoding: 'linear16',
+    sample_rate: '16000',
+    channels: '1',
+    punctuate: 'true',
+    interim_results: 'true',
+    vad_events: 'true',
+    endpointing: '300',       // tighter VAD — 300 ms silence = segment end
+    utterance_end_ms: '800',
   });
 
   const url = `wss://api.deepgram.com/v1/listen?${params.toString()}`;
   const ws = new WebSocket(url);
   ws.binaryType = 'arraybuffer';
 
+  // ── Chunking state ─────────────────────────────────────────────────────────
+  let sentBoundary = 0;  // byte-offset in current segment already sent to onFinal
+  let currentInterim = '';
+  let pauseTimer: ReturnType<typeof setTimeout> | null = null;
+
+  const clearPause = () => {
+    if (pauseTimer) { clearTimeout(pauseTimer); pauseTimer = null; }
+  };
+
+  // Send the slice of the current segment not yet translated.
+  // sentBoundary advances so the same text is never sent twice.
+  const flushChunk = (fullSegment: string) => {
+    const chunk = fullSegment.slice(sentBoundary).trim();
+    if (chunk.length < MIN_CHUNK) return;
+    sentBoundary = fullSegment.length;
+    callbacks.onFinal(chunk);
+  };
+
+  // Full reset between utterances
+  const resetSegment = () => {
+    sentBoundary = 0;
+    currentInterim = '';
+  };
+
+  // ── WebSocket lifecycle ────────────────────────────────────────────────────
   ws.onopen = () => {
-    console.log('[Deepgram] WebSocket connected');
+    console.log('[Deepgram] connected');
     callbacks.onOpen?.();
   };
 
@@ -60,74 +87,85 @@ export function createDeepgramService(
     let msg: DeepgramMessage;
     try {
       msg = JSON.parse(event.data as string) as DeepgramMessage;
-    } catch {
-      return; // Non-JSON frames (keep-alive, etc.) — ignore
+    } catch { return; }
+
+    if (msg.type !== 'Results') return;
+
+    const alt = msg.channel?.alternatives?.[0];
+    const transcript = alt?.transcript?.trim() ?? '';
+
+    // ── speech_final: utterance boundary ─────────────────────────────────
+    if (msg.speech_final) {
+      clearPause();
+      if (transcript) flushChunk(transcript);
+      resetSegment();
+      callbacks.onInterim(''); // clear "recognising..." in main window
+      return;
     }
 
-    if (msg.type === 'Results') {
-      const alt = msg.channel?.alternatives?.[0];
-      const transcript = alt?.transcript?.trim() ?? '';
+    // ── is_final: segment boundary (more speech likely follows) ───────────
+    if (msg.is_final) {
+      clearPause();
+      if (transcript) flushChunk(transcript);
+      resetSegment(); // next interim starts a new segment from index 0
+      return;
+    }
 
-      if (!transcript) return;
+    // ── interim: streaming partial result ─────────────────────────────────
+    if (!transcript) return;
+    currentInterim = transcript;
+    callbacks.onInterim(transcript);
 
-      if (msg.speech_final) {
-        // Sentence boundary — translate this
-        callbacks.onFinal(transcript);
-      } else if (!msg.is_final) {
-        // Mid-utterance interim — show immediately without translation
-        callbacks.onInterim(transcript);
-      }
-    } else if (msg.type === 'Metadata') {
-      console.log('[Deepgram] Metadata:', msg);
-    } else if (msg.type === 'Error') {
-      callbacks.onError(`Deepgram error: ${msg.message ?? JSON.stringify(msg)}`);
+    const newPart = transcript.slice(sentBoundary).trim();
+    if (!newPart || newPart.length < MIN_CHUNK) return;
+
+    if (PUNCT_RE.test(newPart)) {
+      // Punctuation boundary → translate now, don't wait
+      clearPause();
+      flushChunk(transcript);
+    } else {
+      // No punctuation → wait for 300 ms pause then flush
+      clearPause();
+      pauseTimer = setTimeout(() => {
+        const latest = currentInterim.slice(sentBoundary).trim();
+        if (latest.length >= MIN_CHUNK) flushChunk(currentInterim);
+      }, PAUSE_MS);
     }
   };
 
   ws.onerror = (event) => {
-    console.error('[Deepgram] WebSocket error', event);
+    console.error('[Deepgram] error', event);
     callbacks.onError(event);
   };
 
   ws.onclose = (event) => {
-    console.log(`[Deepgram] WebSocket closed (code ${event.code})`);
+    clearPause();
+    console.log(`[Deepgram] closed (${event.code})`);
     callbacks.onClose?.();
   };
 
   return {
     sendAudio(pcm) {
-      if (ws.readyState === WebSocket.OPEN) {
-        ws.send(pcm);
-      }
+      if (ws.readyState === WebSocket.OPEN) ws.send(pcm);
     },
-
     close() {
+      clearPause();
       if (ws.readyState === WebSocket.OPEN) {
-        // Flush remaining audio before closing
         ws.send(JSON.stringify({ type: 'CloseStream' }));
-        setTimeout(() => ws.close(1000, 'User stopped'), 500);
+        setTimeout(() => ws.close(1000, 'stopped'), 500);
       } else {
         ws.close();
       }
     },
-
-    isConnected() {
-      return ws.readyState === WebSocket.OPEN;
-    },
+    isConnected() { return ws.readyState === WebSocket.OPEN; },
   };
 }
 
-// ── Deepgram message types ────────────────────────────────────────────────────
 interface DeepgramMessage {
   type: 'Results' | 'Metadata' | 'UtteranceEnd' | 'Error' | string;
   is_final?: boolean;
   speech_final?: boolean;
-  channel?: {
-    alternatives?: Array<{
-      transcript: string;
-      confidence: number;
-    }>;
-  };
+  channel?: { alternatives?: Array<{ transcript: string; confidence: number }> };
   message?: string;
   [key: string]: unknown;
 }
