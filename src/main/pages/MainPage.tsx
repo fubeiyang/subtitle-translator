@@ -51,6 +51,8 @@ export default function MainPage() {
         service: settings.translationService,
         deeplApiKey: settings.deeplApiKey,
         claudeApiKey: settings.claudeApiKey,
+        claudeBaseUrl: settings.claudeBaseUrl,
+        claudeModel: settings.claudeModel,
         sourceLang: settings.sourceLanguage,
       });
       pushContext(transcript, zh);

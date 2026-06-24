@@ -16,7 +16,7 @@ interface ElectronAPI {
 
   // Translation proxy — routes fetch through main process (uses system proxy)
   translate: (url: string) => Promise<string>;
-  translateClaude: (text: string, contextZh: string | undefined, apiKey: string) => Promise<string>;
+  translateClaude: (text: string, contextZh: string | undefined, apiKey: string, baseUrl?: string, model?: string) => Promise<string>;
 
   updateSubtitle: (payload: SubtitlePayload) => void;
   onSubtitleUpdate: (cb: (payload: SubtitlePayload) => void) => () => void;
@@ -41,6 +41,8 @@ interface AppSettings {
   translationService: 'google' | 'deepl' | 'claude';
   deeplApiKey: string;
   claudeApiKey: string;
+  claudeBaseUrl: string;
+  claudeModel: string;
   sourceLanguage: 'en' | 'ja' | 'ko' | 'multi';
   overlayFontSize: number;
   overlayOpacity: number;

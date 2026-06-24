@@ -26,8 +26,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // Translation proxy — routes fetch through main process so it uses system proxy
   translate: (url) => ipcRenderer.invoke('translate:request', url),
-  translateClaude: (text, contextZh, apiKey) =>
-    ipcRenderer.invoke('translate:claude', { text, contextZh, apiKey }),
+  translateClaude: (text, contextZh, apiKey, baseUrl, model) =>
+    ipcRenderer.invoke('translate:claude', { text, contextZh, apiKey, baseUrl, model }),
 
   // Frameless window controls
   minimizeWindow: () => ipcRenderer.send('window:minimize'),

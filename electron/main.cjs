@@ -212,34 +212,62 @@ ipcMain.handle('translate:request', async (_event, url) => {
   return res.text();
 });
 
-// ── IPC: Claude translation (POST, needs custom headers) ──────────────────────
-ipcMain.handle('translate:claude', async (_event, { text, contextZh, apiKey }) => {
+// ── IPC: AI 翻译（支持 Anthropic 原生格式 & OpenAI 兼容格式）────────────────
+// 无 baseUrl → Anthropic 官方 API (api.anthropic.com)
+// 有 baseUrl → OpenAI 兼容接口 ({baseUrl}/v1/chat/completions)，适配国内大厂及中转
+ipcMain.handle('translate:claude', async (_event, { text, contextZh, apiKey, baseUrl, model }) => {
+  const systemPrompt = '你是一个专业同传专家。请将英文直译为简体中文视频字幕，结合上下文使语意流畅自然，符合书面字幕规范。只输出翻译结果，不加任何解释或额外文字。';
   let userContent = '';
   if (contextZh) userContent += `上一句中文参考：${contextZh}\n\n`;
   userContent += `请将以下英文翻译为简体中文字幕：\n${text}`;
 
-  const res = await net.fetch('https://api.anthropic.com/v1/messages', {
+  // ── 无自定义 URL：走 Anthropic 原生 /v1/messages ─────────────────────────
+  if (!baseUrl) {
+    const res = await net.fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: model || 'claude-haiku-4-5-20251001',
+        max_tokens: 200,
+        system: systemPrompt,
+        messages: [{ role: 'user', content: userContent }],
+      }),
+    });
+    if (!res.ok) {
+      const body = await res.text();
+      throw new Error(`Anthropic API HTTP ${res.status}: ${body.slice(0, 300)}`);
+    }
+    const data = await res.json();
+    return data.content?.[0]?.text?.trim() ?? text;
+  }
+
+  // ── 自定义 Base URL：走 OpenAI 兼容 /v1/chat/completions ─────────────────
+  const endpoint = baseUrl.replace(/\/+$/, '') + '/v1/chat/completions';
+  const res = await net.fetch(endpoint, {
     method: 'POST',
     headers: {
-      'x-api-key': apiKey,
-      'anthropic-version': '2023-06-01',
+      'Authorization': `Bearer ${apiKey}`,
       'content-type': 'application/json',
     },
     body: JSON.stringify({
-      model: 'claude-haiku-4-5-20251001',
+      model: model || 'gpt-4o-mini',
       max_tokens: 200,
-      system: '你是一个专业同传专家。请将英文直译为简体中文视频字幕，结合上下文使语意流畅自然，符合书面字幕规范。只输出翻译结果，不加任何解释或额外文字。',
-      messages: [{ role: 'user', content: userContent }],
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: userContent },
+      ],
     }),
   });
-
   if (!res.ok) {
     const body = await res.text();
-    throw new Error(`Claude API HTTP ${res.status}: ${body.slice(0, 300)}`);
+    throw new Error(`AI API HTTP ${res.status}: ${body.slice(0, 300)}`);
   }
-
   const data = await res.json();
-  return data.content?.[0]?.text?.trim() ?? text;
+  return data.choices?.[0]?.message?.content?.trim() ?? text;
 });
 
 // ── IPC: Frameless window controls ────────────────────────────────────────────

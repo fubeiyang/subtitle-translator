@@ -14,6 +14,8 @@ export default function SettingsPage({ onBack }: Props) {
   const [showDeeplKey, setShowDeeplKey] = useState(false);
   const [claudeKey, setClaudeKey] = useState('');
   const [showClaudeKey, setShowClaudeKey] = useState(false);
+  const [claudeBaseUrl, setClaudeBaseUrl] = useState('');
+  const [claudeModel, setClaudeModel] = useState('');
   const [fontSize, setFontSize] = useState(28);
   const [opacity, setOpacity] = useState(90);
   const [proxyPort, setProxyPort] = useState('7890');
@@ -25,6 +27,8 @@ export default function SettingsPage({ onBack }: Props) {
       setTranslationService(s.translationService ?? 'google');
       setDeeplKey(s.deeplApiKey ?? '');
       setClaudeKey(s.claudeApiKey ?? '');
+      setClaudeBaseUrl(s.claudeBaseUrl ?? '');
+      setClaudeModel(s.claudeModel ?? '');
       setFontSize(s.overlayFontSize ?? 28);
       setOpacity(s.overlayOpacity ?? 90);
       setProxyPort(s.proxyPort ?? '7890');
@@ -39,6 +43,8 @@ export default function SettingsPage({ onBack }: Props) {
       translationService,
       deeplApiKey: deeplKey.trim(),
       claudeApiKey: claudeKey.trim(),
+      claudeBaseUrl: claudeBaseUrl.trim(),
+      claudeModel: claudeModel.trim(),
       overlayFontSize: fontSize,
       overlayOpacity: opacity,
       proxyPort: proxyPort.trim() || '7890',
@@ -152,7 +158,7 @@ export default function SettingsPage({ onBack }: Props) {
                 checked={translationService === 'claude'}
                 onChange={() => setTranslationService('claude')}
               />
-              <span>Claude AI（最佳质量，上下文感知，需要 Key）</span>
+              <span>自定义 AI（最佳质量，上下文感知，需要 Key）</span>
             </label>
           </div>
         </div>
@@ -183,17 +189,41 @@ export default function SettingsPage({ onBack }: Props) {
 
         {translationService === 'claude' && (
           <div className="settings-field">
-            <label>Claude API Key</label>
+            <label>API 基础路径 (Base URL)</label>
             <p className="settings-hint">
-              获取地址：<span className="link-text">console.anthropic.com</span>（按量计费，Haiku 极低成本）
+              留空 = 使用 Anthropic 官方接口；填写国内大厂或中转地址可直接访问，无需代理。
+              例：<span className="link-text">https://api.openai.com</span>
             </p>
+            <input
+              type="text"
+              className="text-input"
+              value={claudeBaseUrl}
+              onChange={(e) => setClaudeBaseUrl(e.target.value)}
+              placeholder="留空使用 Anthropic 官方，或填写如 https://api.siliconflow.cn"
+              spellCheck={false}
+            />
+
+            <label style={{ marginTop: 10 }}>模型名称 (Model)</label>
+            <p className="settings-hint">
+              留空 = 自动选择默认模型。国内大厂请填写对应模型，如 qwen-plus、deepseek-chat、moonshot-v1-8k 等。
+            </p>
+            <input
+              type="text"
+              className="text-input"
+              value={claudeModel}
+              onChange={(e) => setClaudeModel(e.target.value)}
+              placeholder="留空自动，或填写如 qwen-plus / gpt-4o-mini / deepseek-chat"
+              spellCheck={false}
+            />
+
+            <label style={{ marginTop: 10 }}>API 密钥 (API Key)</label>
             <div className="key-input-row">
               <input
                 type={showClaudeKey ? 'text' : 'password'}
                 className="text-input"
                 value={claudeKey}
                 onChange={(e) => setClaudeKey(e.target.value)}
-                placeholder="请输入 Claude API Key（sk-ant-...）"
+                placeholder="请输入 API Key"
                 spellCheck={false}
               />
               <button

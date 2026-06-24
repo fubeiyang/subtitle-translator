@@ -15,6 +15,8 @@ export interface TranslateOptions {
   service: TranslationService;
   deeplApiKey?: string;
   claudeApiKey?: string;
+  claudeBaseUrl?: string;
+  claudeModel?: string;
   sourceLang: string; // 'en' | 'ja' | 'ko' | 'multi'
 }
 
@@ -52,7 +54,7 @@ export async function translateToZh(text: string, opts: TranslateOptions): Promi
 
   try {
     if (opts.service === 'claude' && opts.claudeApiKey) {
-      return await translateClaude(cleaned, opts.claudeApiKey, prevZh);
+      return await translateClaude(cleaned, opts.claudeApiKey, prevZh, opts.claudeBaseUrl, opts.claudeModel);
     }
     if (opts.service === 'deepl' && opts.deeplApiKey) {
       return await translateDeepL(cleaned, from, opts.deeplApiKey, prevZh);
@@ -145,9 +147,9 @@ async function translateYoudao(text: string, from: string): Promise<string> {
     .join('');
 }
 
-// ── Claude API (via main-process IPC — uses system proxy, supports context) ───
-async function translateClaude(text: string, apiKey: string, prevZh?: string): Promise<string> {
-  return window.electronAPI.translateClaude(text, prevZh, apiKey);
+// ── Claude / 自定义 AI (via main-process IPC, supports context) ──────────────
+async function translateClaude(text: string, apiKey: string, prevZh?: string, baseUrl?: string, model?: string): Promise<string> {
+  return window.electronAPI.translateClaude(text, prevZh, apiKey, baseUrl, model);
 }
 
 // ── DeepL API (supports optional context for better coherence) ────────────────

@@ -5,9 +5,12 @@ const DEFAULTS: AppSettings = {
   translationService: 'google',
   deeplApiKey: '',
   claudeApiKey: '',
+  claudeBaseUrl: '',
+  claudeModel: '',
   sourceLanguage: 'en',
   overlayFontSize: 28,
   overlayOpacity: 90,
+  proxyPort: '7890',
 };
 
 let _cache: AppSettings | null = null;
