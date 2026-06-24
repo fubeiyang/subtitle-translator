@@ -4,6 +4,7 @@ const DEFAULTS: AppSettings = {
   deepgramApiKey: '',
   translationService: 'google',
   deeplApiKey: '',
+  claudeApiKey: '',
   sourceLanguage: 'en',
   overlayFontSize: 28,
   overlayOpacity: 90,

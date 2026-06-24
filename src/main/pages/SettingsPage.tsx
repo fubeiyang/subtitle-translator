@@ -9,9 +9,11 @@ interface Props {
 export default function SettingsPage({ onBack }: Props) {
   const [deepgramKey, setDeepgramKey] = useState('');
   const [showDeepgramKey, setShowDeepgramKey] = useState(false);
-  const [translationService, setTranslationService] = useState<'google' | 'deepl'>('google');
+  const [translationService, setTranslationService] = useState<'google' | 'deepl' | 'claude'>('google');
   const [deeplKey, setDeeplKey] = useState('');
   const [showDeeplKey, setShowDeeplKey] = useState(false);
+  const [claudeKey, setClaudeKey] = useState('');
+  const [showClaudeKey, setShowClaudeKey] = useState(false);
   const [fontSize, setFontSize] = useState(28);
   const [opacity, setOpacity] = useState(90);
   const [proxyPort, setProxyPort] = useState('7890');
@@ -22,6 +24,7 @@ export default function SettingsPage({ onBack }: Props) {
       setDeepgramKey(s.deepgramApiKey ?? '');
       setTranslationService(s.translationService ?? 'google');
       setDeeplKey(s.deeplApiKey ?? '');
+      setClaudeKey(s.claudeApiKey ?? '');
       setFontSize(s.overlayFontSize ?? 28);
       setOpacity(s.overlayOpacity ?? 90);
       setProxyPort(s.proxyPort ?? '7890');
@@ -35,6 +38,7 @@ export default function SettingsPage({ onBack }: Props) {
       deepgramApiKey: deepgramKey.trim(),
       translationService,
       deeplApiKey: deeplKey.trim(),
+      claudeApiKey: claudeKey.trim(),
       overlayFontSize: fontSize,
       overlayOpacity: opacity,
       proxyPort: proxyPort.trim() || '7890',
@@ -141,6 +145,15 @@ export default function SettingsPage({ onBack }: Props) {
               />
               <span>DeepL（更精准，需要 Key）</span>
             </label>
+            <label className="radio-label">
+              <input
+                type="radio"
+                value="claude"
+                checked={translationService === 'claude'}
+                onChange={() => setTranslationService('claude')}
+              />
+              <span>Claude AI（最佳质量，上下文感知，需要 Key）</span>
+            </label>
           </div>
         </div>
 
@@ -163,6 +176,32 @@ export default function SettingsPage({ onBack }: Props) {
                 title={showDeeplKey ? '隐藏' : '显示'}
               >
                 {showDeeplKey ? '🙈' : '👁️'}
+              </button>
+            </div>
+          </div>
+        )}
+
+        {translationService === 'claude' && (
+          <div className="settings-field">
+            <label>Claude API Key</label>
+            <p className="settings-hint">
+              获取地址：<span className="link-text">console.anthropic.com</span>（按量计费，Haiku 极低成本）
+            </p>
+            <div className="key-input-row">
+              <input
+                type={showClaudeKey ? 'text' : 'password'}
+                className="text-input"
+                value={claudeKey}
+                onChange={(e) => setClaudeKey(e.target.value)}
+                placeholder="请输入 Claude API Key（sk-ant-...）"
+                spellCheck={false}
+              />
+              <button
+                className="show-key-btn"
+                onClick={() => setShowClaudeKey((v) => !v)}
+                title={showClaudeKey ? '隐藏' : '显示'}
+              >
+                {showClaudeKey ? '🙈' : '👁️'}
               </button>
             </div>
           </div>

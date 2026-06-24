@@ -203,13 +203,43 @@ ipcMain.handle('get-desktop-sources', async () => {
   return sources.map((s) => ({ id: s.id, name: s.name }));
 });
 
-// ── IPC: Translation proxy ────────────────────────────────────────────────────
+// ── IPC: Translation proxy (Google / Youdao — GET) ───────────────────────────
 ipcMain.handle('translate:request', async (_event, url) => {
   const res = await net.fetch(url, {
     headers: { 'User-Agent': 'Mozilla/5.0' },
   });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res.text();
+});
+
+// ── IPC: Claude translation (POST, needs custom headers) ──────────────────────
+ipcMain.handle('translate:claude', async (_event, { text, contextZh, apiKey }) => {
+  let userContent = '';
+  if (contextZh) userContent += `上一句中文参考：${contextZh}\n\n`;
+  userContent += `请将以下英文翻译为简体中文字幕：\n${text}`;
+
+  const res = await net.fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: {
+      'x-api-key': apiKey,
+      'anthropic-version': '2023-06-01',
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({
+      model: 'claude-haiku-4-5-20251001',
+      max_tokens: 200,
+      system: '你是一个专业同传专家。请将英文直译为简体中文视频字幕，结合上下文使语意流畅自然，符合书面字幕规范。只输出翻译结果，不加任何解释或额外文字。',
+      messages: [{ role: 'user', content: userContent }],
+    }),
+  });
+
+  if (!res.ok) {
+    const body = await res.text();
+    throw new Error(`Claude API HTTP ${res.status}: ${body.slice(0, 300)}`);
+  }
+
+  const data = await res.json();
+  return data.content?.[0]?.text?.trim() ?? text;
 });
 
 // ── IPC: Frameless window controls ────────────────────────────────────────────

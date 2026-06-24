@@ -9,11 +9,12 @@
 // pushContext() is called by MainPage after each successful translation.
 // resetContext() is called on stop to clear state between sessions.
 
-export type TranslationService = 'google' | 'deepl';
+export type TranslationService = 'google' | 'deepl' | 'claude';
 
 export interface TranslateOptions {
   service: TranslationService;
   deeplApiKey?: string;
+  claudeApiKey?: string;
   sourceLang: string; // 'en' | 'ja' | 'ko' | 'multi'
 }
 
@@ -50,6 +51,9 @@ export async function translateToZh(text: string, opts: TranslateOptions): Promi
   const prevZh = _ctx.length > 0 ? _ctx[_ctx.length - 1].zh : undefined;
 
   try {
+    if (opts.service === 'claude' && opts.claudeApiKey) {
+      return await translateClaude(cleaned, opts.claudeApiKey, prevZh);
+    }
     if (opts.service === 'deepl' && opts.deeplApiKey) {
       return await translateDeepL(cleaned, from, opts.deeplApiKey, prevZh);
     }
@@ -139,6 +143,11 @@ async function translateYoudao(text: string, from: string): Promise<string> {
     .flat()
     .map((s) => s.tgt)
     .join('');
+}
+
+// ── Claude API (via main-process IPC — uses system proxy, supports context) ───
+async function translateClaude(text: string, apiKey: string, prevZh?: string): Promise<string> {
+  return window.electronAPI.translateClaude(text, prevZh, apiKey);
 }
 
 // ── DeepL API (supports optional context for better coherence) ────────────────

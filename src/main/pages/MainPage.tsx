@@ -50,6 +50,7 @@ export default function MainPage() {
       const zh = await translateToZh(transcript, {
         service: settings.translationService,
         deeplApiKey: settings.deeplApiKey,
+        claudeApiKey: settings.claudeApiKey,
         sourceLang: settings.sourceLanguage,
       });
       pushContext(transcript, zh);

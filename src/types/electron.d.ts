@@ -16,6 +16,7 @@ interface ElectronAPI {
 
   // Translation proxy — routes fetch through main process (uses system proxy)
   translate: (url: string) => Promise<string>;
+  translateClaude: (text: string, contextZh: string | undefined, apiKey: string) => Promise<string>;
 
   updateSubtitle: (payload: SubtitlePayload) => void;
   onSubtitleUpdate: (cb: (payload: SubtitlePayload) => void) => () => void;
@@ -37,8 +38,9 @@ interface ElectronAPI {
 
 interface AppSettings {
   deepgramApiKey: string;
-  translationService: 'google' | 'deepl';
+  translationService: 'google' | 'deepl' | 'claude';
   deeplApiKey: string;
+  claudeApiKey: string;
   sourceLanguage: 'en' | 'ja' | 'ko' | 'multi';
   overlayFontSize: number;
   overlayOpacity: number;
