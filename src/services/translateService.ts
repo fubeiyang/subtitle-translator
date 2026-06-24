@@ -1,9 +1,13 @@
-// Translation service
+// Translation service with context buffer and filler-word cleaning
 //
 // Request chain (in order):
 //   1. Google Translate via Electron main process  — uses system proxy (Clash)
 //   2. Youdao (有道) unofficial API               — China-accessible, no key
 //   3. Google Translate direct fetch               — last resort / dev mode
+//
+// Context buffer keeps the last 2 completed (EN, ZH) pairs.
+// pushContext() is called by MainPage after each successful translation.
+// resetContext() is called on stop to clear state between sessions.
 
 export type TranslationService = 'google' | 'deepl';
 
@@ -13,19 +17,46 @@ export interface TranslateOptions {
   sourceLang: string; // 'en' | 'ja' | 'ko' | 'multi'
 }
 
+// ── Context buffer ────────────────────────────────────────────────────────────
+interface ContextEntry { en: string; zh: string }
+const _ctx: ContextEntry[] = [];
+
+export function pushContext(en: string, zh: string): void {
+  if (!en || !zh) return;
+  _ctx.push({ en, zh });
+  if (_ctx.length > 2) _ctx.shift();
+}
+
+export function resetContext(): void {
+  _ctx.length = 0;
+}
+
+// ── Filler-word cleaning (EN only) ────────────────────────────────────────────
+// Strips common spoken filler words so they don't end up in subtitles.
+const FILLER_RE =
+  /\b(um+h?|uh+|er+|ah+|hmm+|mm+|you know|i mean|i guess|sort of|kind of|you see|well i|basically|actually i|i think i)\b[,.]?\s*/gi;
+
+function cleanFillers(text: string): string {
+  return text.replace(FILLER_RE, ' ').replace(/\s{2,}/g, ' ').trim();
+}
+
+// ── Public entry point ────────────────────────────────────────────────────────
 export async function translateToZh(text: string, opts: TranslateOptions): Promise<string> {
-  if (!text.trim()) return '';
+  const cleaned = cleanFillers(text);
+  if (!cleaned) return '';
 
   const from = opts.sourceLang === 'multi' ? 'auto' : opts.sourceLang;
+  // Previous translated sentence as context (improves coherence in DeepL)
+  const prevZh = _ctx.length > 0 ? _ctx[_ctx.length - 1].zh : undefined;
 
   try {
     if (opts.service === 'deepl' && opts.deeplApiKey) {
-      return await translateDeepL(text, from, opts.deeplApiKey);
+      return await translateDeepL(cleaned, from, opts.deeplApiKey, prevZh);
     }
-    return await translateWithFallback(text, from);
+    return await translateWithFallback(cleaned, from);
   } catch (err) {
     console.warn('[Translate] All services failed, returning original:', err);
-    return text;
+    return cleaned;
   }
 }
 
@@ -34,7 +65,6 @@ async function fetchText(url: string): Promise<string> {
   if (typeof window !== 'undefined' && window.electronAPI?.translate) {
     return window.electronAPI.translate(url);
   }
-  // Dev mode fallback (no Electron context)
   const res = await fetch(url);
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res.text();
@@ -42,7 +72,6 @@ async function fetchText(url: string): Promise<string> {
 
 // ── Multi-layer translation with automatic fallback ──────────────────────────
 async function translateWithFallback(text: string, from: string): Promise<string> {
-  // 1. Google via main process (goes through Clash system proxy)
   try {
     const result = await translateGoogle(text, from, true);
     if (result) return result;
@@ -50,7 +79,6 @@ async function translateWithFallback(text: string, from: string): Promise<string
     console.warn('[Translate] Google (proxy) failed:', e);
   }
 
-  // 2. Youdao — Chinese service, no proxy needed, no key required
   try {
     const result = await translateYoudao(text, from);
     if (result) return result;
@@ -58,7 +86,6 @@ async function translateWithFallback(text: string, from: string): Promise<string
     console.warn('[Translate] Youdao failed:', e);
   }
 
-  // 3. Google direct (works if Clash has global/rule for Google)
   try {
     const result = await translateGoogle(text, from, false);
     if (result) return result;
@@ -114,8 +141,13 @@ async function translateYoudao(text: string, from: string): Promise<string> {
     .join('');
 }
 
-// ── DeepL API ────────────────────────────────────────────────────────────────
-async function translateDeepL(text: string, from: string, apiKey: string): Promise<string> {
+// ── DeepL API (supports optional context for better coherence) ────────────────
+async function translateDeepL(
+  text: string,
+  from: string,
+  apiKey: string,
+  context?: string
+): Promise<string> {
   const isFree = apiKey.endsWith(':fx');
   const base = isFree ? 'https://api-free.deepl.com' : 'https://api.deepl.com';
 
@@ -124,17 +156,21 @@ async function translateDeepL(text: string, from: string, apiKey: string): Promi
   };
   const sourceLang = langMap[from] ?? from.toUpperCase();
 
+  const bodyObj: Record<string, unknown> = {
+    text: [text],
+    target_lang: 'ZH',
+    source_lang: sourceLang === 'auto' ? undefined : sourceLang,
+  };
+  // DeepL Pro supports context parameter to improve translation coherence
+  if (context) bodyObj.context = context;
+
   const res = await fetch(`${base}/v2/translate`, {
     method: 'POST',
     headers: {
       Authorization: `DeepL-Auth-Key ${apiKey}`,
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify({
-      text: [text],
-      target_lang: 'ZH',
-      source_lang: sourceLang === 'auto' ? undefined : sourceLang,
-    }),
+    body: JSON.stringify(bodyObj),
   });
 
   if (!res.ok) throw new Error(`DeepL HTTP ${res.status}`);

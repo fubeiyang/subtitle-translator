@@ -6,7 +6,7 @@ import {
   type DeepgramService,
   type SourceLanguage,
 } from '../../services/deepgramService';
-import { translateToZh } from '../../services/translateService';
+import { translateToZh, pushContext, resetContext } from '../../services/translateService';
 import { loadSettings, getCachedSettings } from '../../services/settingsStore';
 
 type Status = 'idle' | 'connecting' | 'live' | 'error';
@@ -52,6 +52,7 @@ export default function MainPage() {
         deeplApiKey: settings.deeplApiKey,
         sourceLang: settings.sourceLanguage,
       });
+      pushContext(transcript, zh);
       // Only update if overlay is still showing this English chunk
       if (latestEnRef.current === transcript) {
         window.electronAPI.updateSubtitle({ en: transcript, zh, isInterim: false });
@@ -166,6 +167,7 @@ export default function MainPage() {
   };
 
   const stop = () => {
+    resetContext();
     cleanup();
     isRunningRef.current = false;
     setIsRunning(false);

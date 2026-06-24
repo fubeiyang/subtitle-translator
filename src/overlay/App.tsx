@@ -1,6 +1,11 @@
 // Floating subtitle overlay — always-on-top, transparent, draggable
-// Flow: speech_final → English shown immediately → Chinese fills in when translated
-// Subtitle stays until replaced by next sentence; auto-hides after 10s silence
+//
+// Dual-line rolling buffer:
+//   - Keeps at most 2 subtitle entries (previous + current)
+//   - Previous line dimmed to 0.6 opacity; current line at full 1.0
+//   - New subtitle pushes old one up into the "prev" slot
+//   - ZH fills in for current entry when translation arrives (same EN key)
+//   - Entire container fades out after 3 s of silence
 import { useState, useEffect, useRef } from 'react';
 
 interface SubtitlePayload {
@@ -9,55 +14,86 @@ interface SubtitlePayload {
   isInterim: boolean;
 }
 
-export default function OverlayApp() {
-  const [en, setEn] = useState('');
-  const [zh, setZh] = useState('');
-  const [visible, setVisible] = useState(false);
-  const hideTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+interface SubtitleEntry {
+  id: number;
+  en: string;
+  zh: string;
+}
 
-  const resetHideTimer = () => {
-    if (hideTimer.current) clearTimeout(hideTimer.current);
-    hideTimer.current = setTimeout(() => setVisible(false), 10000);
+let _nextId = 0;
+
+export default function OverlayApp() {
+  const [queue, setQueue] = useState<SubtitleEntry[]>([]);
+  const [visible, setVisible] = useState(false);
+
+  const lastEnRef = useRef('');
+  const fadeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const resetFadeTimer = () => {
+    if (fadeTimerRef.current) clearTimeout(fadeTimerRef.current);
+    setVisible(true);
+    fadeTimerRef.current = setTimeout(() => setVisible(false), 3000);
   };
 
   useEffect(() => {
     const cleanup = window.electronAPI.onSubtitleUpdate((payload: SubtitlePayload) => {
       // Explicit clear from stop button
-      if (!payload.zh && !payload.en) {
-        if (hideTimer.current) clearTimeout(hideTimer.current);
+      if (!payload.en && !payload.zh) {
+        if (fadeTimerRef.current) clearTimeout(fadeTimerRef.current);
         setVisible(false);
-        setEn('');
-        setZh('');
+        setQueue([]);
+        lastEnRef.current = '';
         return;
       }
 
-      // Show immediately — if en arrives first without zh, show en;
-      // when zh arrives (same en), just fill in the Chinese line without flicker
-      setEn(payload.en ?? '');
-      setZh(payload.zh ?? '');
-      setVisible(true);
-
-      // Only reset the 10s hide timer when a complete translation arrives (zh present)
-      // so rapid en-only updates don't keep resetting the clock
-      if (payload.zh) {
-        resetHideTimer();
-      } else if (!visible) {
-        // First time showing (en-only interim display), start the timer
-        resetHideTimer();
+      if (payload.en === lastEnRef.current) {
+        // Same sentence: ZH translation arrived — update last item in place
+        if (payload.zh) {
+          setQueue(prev => {
+            if (!prev.length) return prev;
+            const next = [...prev];
+            next[next.length - 1] = { ...next[next.length - 1], zh: payload.zh };
+            return next;
+          });
+          resetFadeTimer();
+        }
+      } else {
+        // New sentence: push into queue, cap at 2
+        lastEnRef.current = payload.en;
+        const entry: SubtitleEntry = { id: _nextId++, en: payload.en, zh: payload.zh ?? '' };
+        setQueue(prev => {
+          const next = [...prev, entry];
+          return next.length > 2 ? next.slice(next.length - 2) : next;
+        });
+        resetFadeTimer();
       }
     });
 
     return () => {
       cleanup();
-      if (hideTimer.current) clearTimeout(hideTimer.current);
+      if (fadeTimerRef.current) clearTimeout(fadeTimerRef.current);
     };
-  }, []);  // eslint-disable-line react-hooks/exhaustive-deps
+  }, []);
 
   return (
     <div className="overlay-root">
-      <div className={`subtitle-bar ${visible ? 'subtitle-bar--visible' : ''}`}>
-        {en && <p className="subtitle-en">{en}</p>}
-        {zh && <p className="subtitle-zh">{zh}</p>}
+      <div className={`subtitle-container ${visible ? 'subtitle-container--visible' : ''}`}>
+        {queue.map((item, i) => {
+          const isCurrent = i === queue.length - 1;
+          return (
+            <div
+              key={item.id}
+              className={`subtitle-row ${isCurrent ? 'subtitle-row--current' : 'subtitle-row--prev'}`}
+            >
+              {isCurrent && item.en && <p className="subtitle-en">{item.en}</p>}
+              {item.zh && <p className="subtitle-zh">{item.zh}</p>}
+              {/* Show EN placeholder while translation is pending */}
+              {isCurrent && !item.zh && item.en && (
+                <p className="subtitle-zh subtitle-zh--pending">{item.en}</p>
+              )}
+            </div>
+          );
+        })}
       </div>
     </div>
   );
