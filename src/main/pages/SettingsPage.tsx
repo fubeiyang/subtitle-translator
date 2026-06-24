@@ -14,6 +14,7 @@ export default function SettingsPage({ onBack }: Props) {
   const [showDeeplKey, setShowDeeplKey] = useState(false);
   const [fontSize, setFontSize] = useState(28);
   const [opacity, setOpacity] = useState(90);
+  const [proxyPort, setProxyPort] = useState('7890');
   const [saved, setSaved] = useState(false);
 
   useEffect(() => {
@@ -23,8 +24,11 @@ export default function SettingsPage({ onBack }: Props) {
       setDeeplKey(s.deeplApiKey ?? '');
       setFontSize(s.overlayFontSize ?? 28);
       setOpacity(s.overlayOpacity ?? 90);
+      setProxyPort(s.proxyPort ?? '7890');
     });
   }, []);
+
+  const [testResult, setTestResult] = useState('');
 
   const handleSave = async () => {
     await saveSettings({
@@ -33,9 +37,20 @@ export default function SettingsPage({ onBack }: Props) {
       deeplApiKey: deeplKey.trim(),
       overlayFontSize: fontSize,
       overlayOpacity: opacity,
+      proxyPort: proxyPort.trim() || '7890',
     });
     setSaved(true);
     setTimeout(() => setSaved(false), 2000);
+  };
+
+  const handleTestKey = async () => {
+    setTestResult('测试中...');
+    const key = deepgramKey.trim();
+    if (!key) { setTestResult('请先输入 API Key'); return; }
+    const r = await (window as any).electronAPI.deepgramTestKey(key);
+    const msg = `HTTP ${r.status}: ${r.body.slice(0, 200)}`;
+    setTestResult(msg);
+    console.log('[KEY TEST]', msg);
   };
 
   return (
@@ -46,6 +61,26 @@ export default function SettingsPage({ onBack }: Props) {
       </button>
 
       <h2 className="settings-title">设置</h2>
+
+      {/* ── Network / Proxy ── */}
+      <section className="settings-section">
+        <div className="settings-section-title">网络代理</div>
+        <div className="settings-field">
+          <label>Clash 代理端口</label>
+          <p className="settings-hint">
+            打开 Clash → 常规，查看"混合代理端口"或"HTTP代理端口"，填在此处（默认 7890）
+          </p>
+          <input
+            type="text"
+            className="text-input"
+            value={proxyPort}
+            onChange={(e) => setProxyPort(e.target.value.replace(/\D/g, ''))}
+            placeholder="7890"
+            maxLength={5}
+            style={{ width: 100 }}
+          />
+        </div>
+      </section>
 
       {/* ── API Keys ── */}
       <section className="settings-section">
@@ -75,6 +110,14 @@ export default function SettingsPage({ onBack }: Props) {
               {showDeepgramKey ? '🙈' : '👁️'}
             </button>
           </div>
+          <button className="show-key-btn" style={{marginTop:6}} onClick={handleTestKey}>
+            🔍 测试 Key
+          </button>
+          {testResult && (
+            <p style={{fontSize:11, marginTop:4, wordBreak:'break-all', color: testResult.includes('HTTP 200') ? 'green' : 'red'}}>
+              {testResult}
+            </p>
+          )}
         </div>
 
         <div className="settings-field">

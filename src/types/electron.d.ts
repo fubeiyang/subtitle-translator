@@ -26,6 +26,13 @@ interface ElectronAPI {
 
   minimizeWindow: () => void;
   closeWindow: () => void;
+
+  // Deepgram via main-process Node.js WebSocket (proxy-safe, crash-safe)
+  deepgramConnect: (params: string, apiKey: string) => Promise<{ success: boolean; message?: string }>;
+  deepgramSendAudio: (buffer: ArrayBuffer) => void;
+  deepgramClose: () => void;
+  onDeepgramMessage: (cb: (data: string) => void) => () => void;
+  onDeepgramStatus: (cb: (status: { type: string; message?: string; code?: number; reason?: string }) => void) => () => void;
 }
 
 interface AppSettings {
@@ -35,6 +42,7 @@ interface AppSettings {
   sourceLanguage: 'en' | 'ja' | 'ko' | 'multi';
   overlayFontSize: number;
   overlayOpacity: number;
+  proxyPort: string;
 }
 
 declare global {

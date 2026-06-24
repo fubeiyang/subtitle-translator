@@ -1,12 +1,16 @@
-// Deepgram Nova-3 real-time streaming — hybrid chunking strategy
+// Deepgram Nova-2 real-time streaming via main-process IPC
 //
-// Trigger hierarchy (earliest wins, all send to onFinal):
+// The renderer's native WebSocket cannot send a custom Authorization header.
+// Passing the key as ?token= causes Deepgram to return 401, which Chromium
+// intercepts as an HTTP auth challenge and fails with "no credentials".
+// Solution: route the WebSocket through the main process (Node.js ws library)
+// which CAN set Authorization headers, and relay messages back via IPC.
+//
+// Trigger hierarchy (earliest wins, all call onFinal):
 //   1. Punctuation in new interim content  → immediate
 //   2. 300 ms pause without new words      → debounce flush
 //   3. is_final (segment boundary)         → guaranteed flush
 //   4. speech_final (utterance boundary)   → flush + full reset
-//
-// This ensures continuous speech never stalls — even without natural pauses.
 
 export type SourceLanguage = 'en' | 'ja' | 'ko' | 'multi';
 
@@ -24,45 +28,37 @@ export interface DeepgramService {
   isConnected: () => boolean;
 }
 
-// Punctuation that signals a good translation boundary
 const PUNCT_RE = /[.!?,;:]\s*$/;
-const MIN_CHUNK = 5;   // minimum chars to bother translating
-const PAUSE_MS  = 300; // ms of silence before force-flush
+const MIN_CHUNK = 5;
+const PAUSE_MS  = 300;
 
 export function createDeepgramService(
   apiKey: string,
   language: SourceLanguage,
   callbacks: DeepgramCallbacks
 ): DeepgramService {
-  void apiKey; // auth injected by main.cjs webRequest interceptor
-
   const params = new URLSearchParams({
-    model: 'nova-3',
-    language,
+    model: 'nova-2',
     encoding: 'linear16',
     sample_rate: '16000',
     channels: '1',
     punctuate: 'true',
     interim_results: 'true',
     vad_events: 'true',
-    endpointing: '300',       // tighter VAD — 300 ms silence = segment end
-    utterance_end_ms: '800',
+    endpointing: '300',
+    utterance_end_ms: '1000',
   });
+  if (language === 'multi') {
+    params.set('detect_language', 'true');
+  } else {
+    params.set('language', language);
+  }
 
-  const url = `wss://api.deepgram.com/v1/listen?${params.toString()}`;
-  const ws = new WebSocket(url);
-  ws.binaryType = 'arraybuffer';
-
-  // ── Connection timeout — trigger error if Deepgram doesn't open in 12 s ───
-  const connectTimer = setTimeout(() => {
-    if (ws.readyState !== WebSocket.OPEN) {
-      ws.close();
-      callbacks.onError('连接超时：无法连接到 Deepgram，请检查网络和代理设置');
-    }
-  }, 12000);
+  let connected = false;
+  let closed = false;
 
   // ── Chunking state ─────────────────────────────────────────────────────────
-  let sentBoundary = 0;  // byte-offset in current segment already sent to onFinal
+  let sentBoundary = 0;
   let currentInterim = '';
   let pauseTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -70,8 +66,6 @@ export function createDeepgramService(
     if (pauseTimer) { clearTimeout(pauseTimer); pauseTimer = null; }
   };
 
-  // Send the slice of the current segment not yet translated.
-  // sentBoundary advances so the same text is never sent twice.
   const flushChunk = (fullSegment: string) => {
     const chunk = fullSegment.slice(sentBoundary).trim();
     if (chunk.length < MIN_CHUNK) return;
@@ -79,48 +73,43 @@ export function createDeepgramService(
     callbacks.onFinal(chunk);
   };
 
-  // Full reset between utterances
   const resetSegment = () => {
     sentBoundary = 0;
     currentInterim = '';
   };
 
-  // ── WebSocket lifecycle ────────────────────────────────────────────────────
-  ws.onopen = () => {
-    clearTimeout(connectTimer);
-    console.log('[Deepgram] connected');
-    callbacks.onOpen?.();
-  };
-
-  ws.onmessage = (event) => {
+  // ── IPC listeners ──────────────────────────────────────────────────────────
+  const cleanupMessage = window.electronAPI.onDeepgramMessage((raw: string) => {
+    if (closed) return;
     let msg: DeepgramMessage;
-    try {
-      msg = JSON.parse(event.data as string) as DeepgramMessage;
-    } catch { return; }
+    try { msg = JSON.parse(raw) as DeepgramMessage; }
+    catch { return; }
+
+    if (msg.type === 'Error') {
+      callbacks.onError(msg.message ?? `Deepgram 错误: ${JSON.stringify(msg)}`);
+      return;
+    }
 
     if (msg.type !== 'Results') return;
 
     const alt = msg.channel?.alternatives?.[0];
     const transcript = alt?.transcript?.trim() ?? '';
 
-    // ── speech_final: utterance boundary ─────────────────────────────────
     if (msg.speech_final) {
       clearPause();
       if (transcript) flushChunk(transcript);
       resetSegment();
-      callbacks.onInterim(''); // clear "recognising..." in main window
+      callbacks.onInterim('');
       return;
     }
 
-    // ── is_final: segment boundary (more speech likely follows) ───────────
     if (msg.is_final) {
       clearPause();
       if (transcript) flushChunk(transcript);
-      resetSegment(); // next interim starts a new segment from index 0
+      resetSegment();
       return;
     }
 
-    // ── interim: streaming partial result ─────────────────────────────────
     if (!transcript) return;
     currentInterim = transcript;
     callbacks.onInterim(transcript);
@@ -129,46 +118,68 @@ export function createDeepgramService(
     if (!newPart || newPart.length < MIN_CHUNK) return;
 
     if (PUNCT_RE.test(newPart)) {
-      // Punctuation boundary → translate now, don't wait
       clearPause();
       flushChunk(transcript);
     } else {
-      // No punctuation → wait for 300 ms pause then flush
       clearPause();
       pauseTimer = setTimeout(() => {
         const latest = currentInterim.slice(sentBoundary).trim();
         if (latest.length >= MIN_CHUNK) flushChunk(currentInterim);
       }, PAUSE_MS);
     }
-  };
+  });
 
-  ws.onerror = (event) => {
-    console.error('[Deepgram] error', event);
-    callbacks.onError(event);
-  };
+  const cleanupStatus = window.electronAPI.onDeepgramStatus(
+    (status: { type: string; message?: string; code?: number; reason?: string }) => {
+      if (closed) return;
+      console.log('[DG] status:', status.type, status.message ?? '', status.code ?? '');
 
-  ws.onclose = (event) => {
-    clearTimeout(connectTimer);
-    clearPause();
-    console.log(`[Deepgram] closed (${event.code})`);
-    callbacks.onClose?.();
-  };
+      if (status.type === 'open') {
+        connected = true;
+        callbacks.onOpen?.();
+      } else if (status.type === 'error') {
+        clearPause();
+        callbacks.onError(status.message ?? 'Deepgram 连接错误');
+      } else if (status.type === 'close') {
+        clearPause();
+        connected = false;
+        if (status.code && status.code !== 1000) {
+          const reason = status.reason ? `: ${status.reason}` : '';
+          callbacks.onError(`连接被关闭 (code ${status.code}${reason})`);
+        } else {
+          callbacks.onClose?.();
+        }
+      }
+    }
+  );
+
+  // ── Initiate connection (non-blocking; result comes back via onDeepgramStatus) ──
+  window.electronAPI.deepgramConnect(params.toString(), apiKey).then(
+    (result: { success: boolean; message?: string }) => {
+      if (closed) return;
+      if (!result.success) {
+        clearPause();
+        callbacks.onError(result.message ?? 'Deepgram 连接失败');
+      }
+      // success=true → 'open' status arrives via onDeepgramStatus
+    }
+  );
 
   return {
     sendAudio(pcm) {
-      if (ws.readyState === WebSocket.OPEN) ws.send(pcm);
-    },
-    close() {
-      clearTimeout(connectTimer);
-      clearPause();
-      if (ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: 'CloseStream' }));
-        setTimeout(() => ws.close(1000, 'stopped'), 500);
-      } else {
-        ws.close();
+      if (connected) {
+        window.electronAPI.deepgramSendAudio(pcm);
       }
     },
-    isConnected() { return ws.readyState === WebSocket.OPEN; },
+    close() {
+      closed = true;
+      clearPause();
+      window.electronAPI.deepgramClose();
+      connected = false;
+      cleanupMessage?.();
+      cleanupStatus?.();
+    },
+    isConnected() { return connected; },
   };
 }
 

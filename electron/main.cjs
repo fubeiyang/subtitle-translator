@@ -3,6 +3,34 @@ const { app, BrowserWindow, ipcMain, desktopCapturer, session, screen, net } = r
 const path = require('path');
 const fs = require('fs');
 
+// ── Process-level crash guard ─────────────────────────────────────────────────
+// Prevents the entire app from crashing when the network layer throws (e.g.
+// "Network service crashed" under Clash proxy). Errors are caught here and
+// forwarded to the renderer as a graceful error message instead.
+process.on('uncaughtException', (err) => {
+  console.error('[FATAL] uncaughtException in main process:', err);
+  try {
+    mainWindow?.webContents.send('deepgram:status', {
+      type: 'error',
+      message: `主进程异常: ${err.message}`,
+    });
+  } catch {}
+});
+
+process.on('unhandledRejection', (reason) => {
+  console.error('[FATAL] unhandledRejection in main process:', reason);
+  try {
+    mainWindow?.webContents.send('deepgram:status', {
+      type: 'error',
+      message: `主进程异步异常: ${String(reason)}`,
+    });
+  } catch {}
+});
+
+// ── Node.js WebSocket + proxy (bypasses Electron's crash-prone network stack) ─
+const WS = require('ws');
+const { HttpsProxyAgent } = require('https-proxy-agent');
+
 const isDev = process.env.NODE_ENV === 'development';
 const DEV_URL = 'http://localhost:5173';
 
@@ -36,9 +64,7 @@ function createMainWindow() {
     height: 700,
     frame: false,
     transparent: true,
-    // Windows 11 Acrylic frosted glass
     backgroundMaterial: process.platform === 'win32' ? 'acrylic' : undefined,
-    // macOS frosted glass
     vibrancy: process.platform === 'darwin' ? 'hud' : undefined,
     resizable: false,
     center: true,
@@ -65,6 +91,8 @@ function createMainWindow() {
   mainWindow.on('closed', () => {
     mainWindow = null;
     overlayWindow?.close();
+    // Clean up any active Deepgram connection
+    safeTerminateDeepgram();
   });
 }
 
@@ -76,7 +104,7 @@ function createOverlayWindow() {
     width: 900,
     height: 180,
     x: Math.round((sw - 900) / 2),
-    y: Math.round(sh * 0.76), // 76% down — slightly higher for two-line display
+    y: Math.round(sh * 0.76),
     frame: false,
     transparent: true,
     alwaysOnTop: true,
@@ -92,7 +120,6 @@ function createOverlayWindow() {
     },
   });
 
-  // Highest possible z-order so it floats above any video player
   overlayWindow.setAlwaysOnTop(true, 'screen-saver', 1);
 
   if (isDev) {
@@ -102,22 +129,15 @@ function createOverlayWindow() {
   }
 }
 
-// ── WASAPI Loopback — the key to system audio capture on Windows ─────────────
-// On Windows, setting audio:'loopback' in setDisplayMediaRequestHandler
-// triggers WASAPI loopback capture (captures whatever is playing through speakers),
-// bypassing the need for VB-Cable or any virtual audio device.
+// ── WASAPI Loopback ──────────────────────────────────────────────────────────
 function setupAudioCapture() {
   session.defaultSession.setDisplayMediaRequestHandler((request, callback) => {
     desktopCapturer
       .getSources({ types: ['screen'] })
       .then((sources) => {
         if (process.platform === 'win32') {
-          // Windows: WASAPI loopback — system audio with zero setup
           callback({ video: sources[0], audio: 'loopback' });
         } else {
-          // macOS: audio loopback requires BlackHole or ScreenCaptureKit.
-          // Here we pass undefined audio; the user picks a window that includes audio.
-          // See README for macOS BlackHole setup guide.
           callback({ video: sources[0] });
         }
       })
@@ -125,35 +145,15 @@ function setupAudioCapture() {
   });
 }
 
-// ── Deepgram auth header injection ───────────────────────────────────────────
-// Browser WebSocket cannot set custom headers, so Electron intercepts the
-// outgoing WebSocket upgrade request and injects "Authorization: Token KEY".
-// This avoids the need for the unreliable access_token URL parameter.
-function setupDeepgramAuth() {
-  session.defaultSession.webRequest.onBeforeSendHeaders(
-    { urls: ['wss://api.deepgram.com/*', 'https://api.deepgram.com/*'] },
-    (details, callback) => {
-      const settings = readSettings();
-      const apiKey = settings.deepgramApiKey || '';
-      callback({
-        requestHeaders: {
-          ...details.requestHeaders,
-          Authorization: `Token ${apiKey}`,
-        },
-      });
-    }
-  );
-}
-
 // ── App lifecycle ────────────────────────────────────────────────────────────
 app.whenReady().then(() => {
-  setupDeepgramAuth();
   setupAudioCapture();
   createMainWindow();
   createOverlayWindow();
 });
 
 app.on('window-all-closed', () => {
+  safeTerminateDeepgram();
   if (process.platform !== 'darwin') app.quit();
 });
 
@@ -168,12 +168,25 @@ ipcMain.handle('settings:set', (_event, data) => {
   return true;
 });
 
-// ── IPC: Subtitle relay (main renderer → overlay) ────────────────────────────
+// ── IPC: Deepgram key test (REST, not WebSocket) ──────────────────────────────
+ipcMain.handle('deepgram:test-key', async (_event, apiKey) => {
+  try {
+    const res = await net.fetch('https://api.deepgram.com/v1/projects', {
+      headers: { Authorization: `Token ${apiKey}` },
+    });
+    const body = await res.text();
+    return { status: res.status, body };
+  } catch (e) {
+    return { status: -1, body: e.message };
+  }
+});
+
+// ── IPC: Subtitle relay ───────────────────────────────────────────────────────
 ipcMain.on('subtitle:update', (_event, payload) => {
   overlayWindow?.webContents.send('subtitle:update', payload);
 });
 
-// ── IPC: Overlay window control ───────────────────────────────────────────────
+// ── IPC: Overlay controls ─────────────────────────────────────────────────────
 ipcMain.on('overlay:show', () => overlayWindow?.show());
 ipcMain.on('overlay:hide', () => overlayWindow?.hide());
 ipcMain.on('overlay:toggle', () => {
@@ -181,7 +194,7 @@ ipcMain.on('overlay:toggle', () => {
   else overlayWindow?.show();
 });
 
-// ── IPC: Desktop capture sources (for getDisplayMedia) ───────────────────────
+// ── IPC: Desktop capture sources ──────────────────────────────────────────────
 ipcMain.handle('get-desktop-sources', async () => {
   const sources = await desktopCapturer.getSources({
     types: ['screen'],
@@ -190,8 +203,7 @@ ipcMain.handle('get-desktop-sources', async () => {
   return sources.map((s) => ({ id: s.id, name: s.name }));
 });
 
-// ── IPC: Translation proxy (renderer fetch → main process → system proxy) ────
-// electron.net.fetch() honours Clash / system proxy; renderer fetch() does not.
+// ── IPC: Translation proxy ────────────────────────────────────────────────────
 ipcMain.handle('translate:request', async (_event, url) => {
   const res = await net.fetch(url, {
     headers: { 'User-Agent': 'Mozilla/5.0' },
@@ -200,6 +212,172 @@ ipcMain.handle('translate:request', async (_event, url) => {
   return res.text();
 });
 
-// ── IPC: Frameless window drag / controls ─────────────────────────────────────
+// ── IPC: Frameless window controls ────────────────────────────────────────────
 ipcMain.on('window:minimize', () => mainWindow?.minimize());
 ipcMain.on('window:close', () => mainWindow?.close());
+
+// ── Deepgram WebSocket via Node.js ws + system proxy ─────────────────────────
+// Strategy: try proxy first (8 s), then fall back to direct (8 s).
+// This covers TUN mode (direct works), system-proxy mode (proxy works),
+// and wrong-port configs (error message tells the user exactly what failed).
+
+let activeWs = null; // current ws.WebSocket instance
+
+function safeTerminateDeepgram() {
+  if (!activeWs) return;
+  try { activeWs.terminate(); } catch {}
+  activeWs = null;
+}
+
+// Build an HttpsProxyAgent from multiple sources (priority order).
+async function buildProxyAgent(userProxyPort) {
+  // 1. Windows / macOS system proxy (what Clash's "System Proxy" switch sets)
+  try {
+    const pac = await app.resolveProxy('https://api.deepgram.com');
+    const match = pac && pac.match(/PROXY\s+([\w.[\]]+:\d+)/i);
+    if (match) {
+      console.log('[Deepgram] system proxy:', match[1]);
+      return new HttpsProxyAgent(`http://${match[1]}`);
+    }
+  } catch {}
+
+  // 2. Environment variables (set by some proxy tools)
+  const envProxy =
+    process.env.HTTPS_PROXY || process.env.https_proxy ||
+    process.env.HTTP_PROXY  || process.env.http_proxy;
+  if (envProxy) {
+    console.log('[Deepgram] env proxy:', envProxy);
+    return new HttpsProxyAgent(envProxy);
+  }
+
+  // 3. User-configured port in settings (default 7890)
+  const fallback = `http://127.0.0.1:${userProxyPort}`;
+  console.log('[Deepgram] fallback proxy:', fallback);
+  return new HttpsProxyAgent(fallback);
+}
+
+// Attempt to open a WS connection; resolves with the ready ws instance,
+// rejects on error or after timeoutMs.
+function openWs(url, wsOptions, label, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    let ws;
+    try { ws = new WS(url, wsOptions); }
+    catch (e) { return reject(new Error(`${label}: 初始化失败 ${e.message}`)); }
+
+    const t = setTimeout(() => {
+      ws.terminate();
+      reject(new Error(`${label}: 超时 (${timeoutMs / 1000}s)`));
+    }, timeoutMs);
+
+    const onError = (err) => {
+      clearTimeout(t);
+      ws.off('error', onError);
+      ws.terminate();
+      // Read Deepgram's HTTP response body for the exact rejection reason
+      if (err.response) {
+        let body = '';
+        err.response.on('data', (chunk) => { body += chunk.toString(); });
+        err.response.on('end', () => {
+          reject(new Error(`${label}: ${err.message} → ${body}`));
+        });
+        err.response.on('error', () => {
+          reject(new Error(`${label}: ${err.message}`));
+        });
+      } else {
+        reject(new Error(`${label}: ${err.message}`));
+      }
+    };
+
+    ws.once('open', () => {
+      clearTimeout(t);
+      ws.off('error', onError);
+      resolve(ws);
+    });
+    ws.on('error', onError);
+  });
+}
+
+// Attach persistent event handlers to a connected ws and notify renderer.
+function attachAndNotify(ws) {
+  activeWs = ws;
+  mainWindow?.webContents.send('deepgram:status', { type: 'open' });
+
+  ws.on('message', (data) => {
+    mainWindow?.webContents.send('deepgram:message', data.toString('utf8'));
+  });
+  ws.on('error', (err) => {
+    console.error('[Deepgram] ws error:', err.message);
+    mainWindow?.webContents.send('deepgram:status', { type: 'error', message: err.message });
+  });
+  ws.on('close', (code, reason) => {
+    const reasonStr = reason ? reason.toString('utf8') : '';
+    console.log(`[Deepgram] closed: ${code} ${reasonStr}`);
+    mainWindow?.webContents.send('deepgram:status', { type: 'close', code, reason: reasonStr });
+    if (activeWs === ws) activeWs = null;
+  });
+
+  return { success: true };
+}
+
+ipcMain.handle('deepgram:connect', async (_event, { params, apiKey }) => {
+  safeTerminateDeepgram();
+
+  const url = `wss://api.deepgram.com/v1/listen?${params}`;
+  const wsHeaders = { Authorization: `Token ${apiKey}` };
+  const userProxyPort = readSettings().proxyPort || '7890';
+  const errors = [];
+
+  let agent = null;
+  try { agent = await buildProxyAgent(userProxyPort); } catch {}
+
+  // ── Attempt 1: via proxy ──────────────────────────────────────────────────
+  if (agent) {
+    try {
+      const ws = await openWs(url, { headers: wsHeaders, agent }, `代理 127.0.0.1:${userProxyPort}`, 8000);
+      console.log('[Deepgram] connected via proxy');
+      return attachAndNotify(ws);
+    } catch (e) {
+      errors.push(e.message);
+      console.log('[Deepgram] proxy failed:', e.message, '-> trying direct');
+    }
+  }
+
+  // ── Attempt 2: direct (works when Clash is in TUN mode) ──────────────────
+  try {
+    const ws = await openWs(url, { headers: wsHeaders }, '直连', 8000);
+    console.log('[Deepgram] connected directly');
+    return attachAndNotify(ws);
+  } catch (e) {
+    errors.push(e.message);
+    console.log('[Deepgram] direct also failed:', e.message);
+  }
+
+  return { success: false, message: errors.join(' | ') };
+});
+
+ipcMain.on('deepgram:audio', (_event, buffer) => {
+  if (activeWs && activeWs.readyState === WS.OPEN) {
+    try {
+      // buffer arrives as ArrayBuffer; convert to Node.js Buffer for ws.send()
+      activeWs.send(Buffer.from(buffer));
+    } catch (err) {
+      console.error('[Deepgram] send error:', err.message);
+    }
+  }
+});
+
+ipcMain.on('deepgram:close', () => {
+  if (!activeWs) return;
+  try {
+    if (activeWs.readyState === WS.OPEN) {
+      activeWs.send(JSON.stringify({ type: 'CloseStream' }));
+      const ws = activeWs;
+      setTimeout(() => { try { ws.terminate(); } catch {} }, 500);
+    } else {
+      activeWs.terminate();
+    }
+  } catch (err) {
+    console.error('[Deepgram] close error:', err.message);
+  }
+  activeWs = null;
+});

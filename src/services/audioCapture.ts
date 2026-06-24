@@ -36,17 +36,18 @@ export function createAudioCapture(): AudioCapture {
         audio: true,
       });
 
-      // Discard video — we only need audio
-      rawStream.getVideoTracks().forEach((t) => t.stop());
-
+      // Keep ALL tracks alive — stopping the video track on Windows terminates
+      // the entire WASAPI loopback capture session, killing audio as well.
+      // Video tracks are stopped together with audio in stop().
       const audioTracks = rawStream.getAudioTracks();
       if (audioTracks.length === 0) {
+        rawStream.getTracks().forEach((t) => t.stop());
         throw new Error(
           '未获取到音频轨道。Windows 请确保系统有音频输出；macOS 请安装 BlackHole 并将其设为输出设备。'
         );
       }
 
-      stream = new MediaStream(audioTracks);
+      stream = rawStream; // hold full stream so stop() cleans up everything
 
       // Resample to 16 kHz for Deepgram linear16 encoding
       audioContext = new AudioContext({ sampleRate: SAMPLE_RATE });

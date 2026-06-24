@@ -30,4 +30,28 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Frameless window controls
   minimizeWindow: () => ipcRenderer.send('window:minimize'),
   closeWindow: () => ipcRenderer.send('window:close'),
+
+  // Test Deepgram API key via REST (no WebSocket)
+  deepgramTestKey: (apiKey) => ipcRenderer.invoke('deepgram:test-key', apiKey),
+
+  // ── Deepgram via main-process Node.js WebSocket (proxy-safe, crash-safe) ────
+  // The renderer never touches wss:// directly; all traffic goes through the
+  // main process ws library which routes via the system proxy and is not
+  // affected by Electron's "Network service crashed" failure mode.
+  deepgramConnect: (params, apiKey) =>
+    ipcRenderer.invoke('deepgram:connect', { params, apiKey }),
+  deepgramSendAudio: (buffer) =>
+    ipcRenderer.send('deepgram:audio', buffer),
+  deepgramClose: () =>
+    ipcRenderer.send('deepgram:close'),
+  onDeepgramMessage: (cb) => {
+    const handler = (_event, data) => cb(data);
+    ipcRenderer.on('deepgram:message', handler);
+    return () => ipcRenderer.removeListener('deepgram:message', handler);
+  },
+  onDeepgramStatus: (cb) => {
+    const handler = (_event, status) => cb(status);
+    ipcRenderer.on('deepgram:status', handler);
+    return () => ipcRenderer.removeListener('deepgram:status', handler);
+  },
 });

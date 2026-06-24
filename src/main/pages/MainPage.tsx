@@ -83,6 +83,7 @@ export default function MainPage() {
       const audio = createAudioCapture();
       const dg = createDeepgramService(settings.deepgramApiKey, sourceLang, {
         onOpen() {
+          console.log('[START] onOpen fired → going live');
           isRunningRef.current = true;
           setStatus('live');
           setIsRunning(true);
@@ -111,29 +112,53 @@ export default function MainPage() {
         },
 
         onError(err) {
-          console.error('[Deepgram]', err);
+          console.error('[START] onError fired:', err);
           const msg = typeof err === 'string' ? err : 'Deepgram 连接失败，请检查 API Key 和网络';
           setErrorMsg(msg);
           setStatus('error');
-          stop();
+          // Don't call stop() here — it sets status back to 'idle', hiding the error.
+          // Do the same teardown manually, preserving 'error' status.
+          isRunningRef.current = false;
+          setIsRunning(false);
+          setInterimText('');
+          translatingRef.current = false;
+          pendingFinalRef.current = null;
+          latestEnRef.current = '';
+          cleanup();
+          window.electronAPI.hideOverlay();
+          window.electronAPI.updateSubtitle({ en: '', zh: '', isInterim: false });
         },
 
         onClose() {
-          // Use ref to avoid stale React closure — isRunning state would always
-          // read false here because the callback was created before setIsRunning(true)
+          console.log('[START] onClose fired, isRunningRef=', isRunningRef.current);
           if (isRunningRef.current) {
+            // Was live → connection dropped unexpectedly (Deepgram closed it)
             isRunningRef.current = false;
-            setStatus('idle');
             setIsRunning(false);
+            setInterimText('');
+            setErrorMsg('连接已断开：Deepgram 未收到音频，请确认系统有音频输出且音量不为零');
+            setStatus('error');
+            cleanup();
+            window.electronAPI.hideOverlay();
+            window.electronAPI.updateSubtitle({ en: '', zh: '', isInterim: false });
           }
         },
       });
 
       deepgramRef.current = dg;
+      console.log('[START] calling audio.start()...');
       await audio.start((pcmChunk) => dg.sendAudio(pcmChunk));
-      audioRef.current = audio;
+      console.log('[START] audio.start() resolved');
+      // If onError fired during audio.start(), deepgramRef was nulled by cleanup().
+      // In that case stop audio instead of leaking it.
+      if (deepgramRef.current === dg) {
+        audioRef.current = audio;
+      } else {
+        audio.stop();
+      }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
+      console.error('[START] catch block:', msg);
       setErrorMsg(msg);
       setStatus('error');
       cleanup();
