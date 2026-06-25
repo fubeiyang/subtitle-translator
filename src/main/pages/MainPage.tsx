@@ -6,7 +6,7 @@ import {
   type DeepgramService,
   type SourceLanguage,
 } from '../../services/deepgramService';
-import { translateToZh, pushContext, resetContext } from '../../services/translateService';
+import { translateToZhStream, pushContext, resetContext } from '../../services/translateService';
 import { loadSettings, getCachedSettings } from '../../services/settingsStore';
 
 type Status = 'idle' | 'connecting' | 'live' | 'error';
@@ -28,10 +28,9 @@ export default function MainPage() {
   const audioRef = useRef<AudioCapture | null>(null);
   const deepgramRef = useRef<DeepgramService | null>(null);
 
-  // Translation queue: one request in-flight, one pending slot
-  const translatingRef = useRef(false);
-  const pendingFinalRef = useRef<string | null>(null);
-  // Tracks the EN text currently shown in overlay so stale translations are discarded
+  // requestId: increments on every new transcript; stale callbacks self-discard
+  const requestIdRef = useRef(0);
+  // Tracks latest transcript so out-of-order completions are ignored
   const latestEnRef = useRef('');
   // Ref mirror of isRunning so callbacks don't capture stale closure values
   const isRunningRef = useRef(false);
@@ -39,38 +38,35 @@ export default function MainPage() {
   useEffect(() => { loadSettings().catch(console.error); }, []);
 
   // ── Translation engine ────────────────────────────────────────────────────
-  // Shows English immediately; fills in Chinese when translation completes.
-  // If a newer EN chunk arrived while translating, the old ZH result is dropped.
+  // Fire-and-forget: each call starts immediately (no serial queue).
+  // AbortController in main.cjs cancels the previous HTTP stream at network level.
+  // requestId ensures stale streaming chunks / completed results are silently dropped.
   const doTranslate = useCallback(async (
     transcript: string,
     settings: ReturnType<typeof getCachedSettings>
   ) => {
-    translatingRef.current = true;
+    const myId = ++requestIdRef.current;
+    const isStale = () => requestIdRef.current !== myId || latestEnRef.current !== transcript;
+
     try {
-      const zh = await translateToZh(transcript, {
+      const zh = await translateToZhStream(transcript, {
         service: settings.translationService,
         deeplApiKey: settings.deeplApiKey,
         claudeApiKey: settings.claudeApiKey,
         claudeBaseUrl: settings.claudeBaseUrl,
         claudeModel: settings.claudeModel,
         sourceLang: settings.sourceLanguage,
+      }, (partial) => {
+        if (isStale()) return;
+        window.electronAPI.updateSubtitle({ en: transcript, zh: partial, isInterim: true });
       });
+
+      if (isStale()) return;
       pushContext(transcript, zh);
-      // Only update if overlay is still showing this English chunk
-      if (latestEnRef.current === transcript) {
-        window.electronAPI.updateSubtitle({ en: transcript, zh, isInterim: false });
-      }
+      window.electronAPI.updateSubtitle({ en: transcript, zh, isInterim: false });
     } catch {
-      if (latestEnRef.current === transcript) {
-        window.electronAPI.updateSubtitle({ en: transcript, zh: transcript, isInterim: false });
-      }
-    } finally {
-      translatingRef.current = false;
-      if (pendingFinalRef.current !== null) {
-        const next = pendingFinalRef.current;
-        pendingFinalRef.current = null;
-        doTranslate(next, getCachedSettings());
-      }
+      if (isStale()) return;
+      window.electronAPI.updateSubtitle({ en: transcript, zh: transcript, isInterim: false });
     }
   }, []);
 
@@ -105,14 +101,9 @@ export default function MainPage() {
         onFinal(transcript) {
           setInterimText('');
           latestEnRef.current = transcript;
-          window.electronAPI.updateSubtitle({ en: transcript, zh: '', isInterim: false });
-
-          const s = getCachedSettings();
-          if (translatingRef.current) {
-            pendingFinalRef.current = transcript;
-          } else {
-            doTranslate(transcript, s);
-          }
+          // Show EN immediately (latency compensation) — ZH streams in via doTranslate
+          window.electronAPI.updateSubtitle({ en: transcript, zh: '', isInterim: true });
+          doTranslate(transcript, getCachedSettings());
         },
 
         onError(err) {
@@ -125,8 +116,7 @@ export default function MainPage() {
           isRunningRef.current = false;
           setIsRunning(false);
           setInterimText('');
-          translatingRef.current = false;
-          pendingFinalRef.current = null;
+          requestIdRef.current++;
           latestEnRef.current = '';
           cleanup();
           window.electronAPI.hideOverlay();
@@ -176,8 +166,7 @@ export default function MainPage() {
     setIsRunning(false);
     setStatus('idle');
     setInterimText('');
-    translatingRef.current = false;
-    pendingFinalRef.current = null;
+    requestIdRef.current++;   // invalidate any in-flight translation
     latestEnRef.current = '';
     window.electronAPI.hideOverlay();
     window.electronAPI.updateSubtitle({ en: '', zh: '', isInterim: false });

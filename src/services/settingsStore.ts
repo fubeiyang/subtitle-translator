@@ -8,7 +8,7 @@ const DEFAULTS: AppSettings = {
   claudeBaseUrl: '',
   claudeModel: '',
   sourceLanguage: 'en',
-  overlayFontSize: 28,
+  overlayFontSize: 18,
   overlayOpacity: 90,
   proxyPort: '7890',
 };

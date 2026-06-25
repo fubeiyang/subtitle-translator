@@ -152,6 +152,37 @@ async function translateClaude(text: string, apiKey: string, prevZh?: string, ba
   return window.electronAPI.translateClaude(text, prevZh, apiKey, baseUrl, model);
 }
 
+// ── Streaming entry point — emits partial ZH via onChunk as tokens arrive ────
+export async function translateToZhStream(
+  text: string,
+  opts: TranslateOptions,
+  onChunk: (partial: string) => void,
+): Promise<string> {
+  const cleaned = cleanFillers(text);
+  if (!cleaned) return '';
+  const prevZh = _ctx.length > 0 ? _ctx[_ctx.length - 1].zh : undefined;
+
+  if (opts.service === 'claude' && opts.claudeApiKey) {
+    const cleanup = window.electronAPI.onTranslateStreamChunk(onChunk);
+    try {
+      const result = await window.electronAPI.translateClaudeStream(
+        cleaned, prevZh, opts.claudeApiKey, opts.claudeBaseUrl, opts.claudeModel,
+      );
+      return result || cleaned;
+    } catch (err) {
+      console.warn('[Translate] Stream failed:', err);
+      return cleaned;
+    } finally {
+      cleanup();
+    }
+  }
+
+  // Google / DeepL — non-streaming, emit full result as single chunk
+  const result = await translateToZh(text, opts);
+  onChunk(result);
+  return result;
+}
+
 // ── DeepL API (supports optional context for better coherence) ────────────────
 async function translateDeepL(
   text: string,

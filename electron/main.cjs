@@ -165,6 +165,12 @@ app.on('activate', () => {
 ipcMain.handle('settings:get', () => readSettings());
 ipcMain.handle('settings:set', (_event, data) => {
   writeSettings(data);
+  // Push display settings to overlay window so changes take effect without restart
+  const saved = readSettings();
+  overlayWindow?.webContents.send('overlay:settings', {
+    fontSize: saved.overlayFontSize ?? 18,
+    opacity:  saved.overlayOpacity  ?? 90,
+  });
   return true;
 });
 
@@ -216,7 +222,7 @@ ipcMain.handle('translate:request', async (_event, url) => {
 // 无 baseUrl → Anthropic 官方 API (api.anthropic.com)
 // 有 baseUrl → OpenAI 兼容接口 ({baseUrl}/v1/chat/completions)，适配国内大厂及中转
 ipcMain.handle('translate:claude', async (_event, { text, contextZh, apiKey, baseUrl, model }) => {
-  const systemPrompt = '你是一个专业同传专家。请将英文直译为简体中文视频字幕，结合上下文使语意流畅自然，符合书面字幕规范。只输出翻译结果，不加任何解释或额外文字。';
+  const systemPrompt = '你是一个专业电影字幕组同声传译。请将英文意译为简体中文，语言简洁口语化，严禁字面翻译，优先意译，单句不超过20个字。在流式输出过程中，请根据上下文语境实时修正翻译，保持语义流畅自然。只输出翻译结果，不加任何解释或额外文字。';
   let userContent = '';
   if (contextZh) userContent += `上一句中文参考：${contextZh}\n\n`;
   userContent += `请将以下英文翻译为简体中文字幕：\n${text}`;
@@ -268,6 +274,83 @@ ipcMain.handle('translate:claude', async (_event, { text, contextZh, apiKey, bas
   }
   const data = await res.json();
   return data.choices?.[0]?.message?.content?.trim() ?? text;
+});
+
+// ── IPC: AI 翻译 · 流式输出（SSE，支持 AbortController 取消过期请求）─────────
+// Each new request aborts the previous in-flight HTTP stream so stale chunks
+// never reach the renderer after a newer audio segment has been queued.
+let _streamController = null;
+
+ipcMain.handle('translate:claude:stream', async (event, { text, contextZh, apiKey, baseUrl, model }) => {
+  // Abort any previous in-flight stream immediately
+  if (_streamController) { _streamController.abort(); _streamController = null; }
+  const controller = new AbortController();
+  _streamController = controller;
+
+  const systemPrompt = '你是一个专业电影字幕组同声传译。请将英文意译为简体中文，语言简洁口语化，严禁字面翻译，优先意译，单句不超过20个字。在流式输出过程中，请根据上下文语境实时修正翻译，保持语义流畅自然。只输出翻译结果，不加任何解释或额外文字。';
+  let userContent = '';
+  if (contextZh) userContent += `上一句中文参考：${contextZh}\n\n`;
+  userContent += `请将以下英文翻译为简体中文字幕：\n${text}`;
+
+  const endpoint = (baseUrl || 'https://api.anthropic.com').replace(/\/+$/, '') + '/v1/chat/completions';
+  const headers = baseUrl
+    ? { 'Authorization': `Bearer ${apiKey}`, 'content-type': 'application/json' }
+    : { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' };
+
+  const decoder = new TextDecoder();
+  let accumulated = '';
+  let reader = null;
+
+  try {
+    const res = await net.fetch(endpoint, {
+      method: 'POST',
+      headers,
+      signal: controller.signal,
+      body: JSON.stringify({
+        model: model || (baseUrl ? 'deepseek-chat' : 'claude-haiku-4-5-20251001'),
+        max_tokens: 200,
+        stream: true,
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userContent },
+        ],
+      }),
+    });
+
+    if (!res.ok) {
+      const body = await res.text();
+      throw new Error(`AI API HTTP ${res.status}: ${body.slice(0, 300)}`);
+    }
+
+    reader = res.body.getReader();
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done || controller.signal.aborted) break;
+      const chunk = decoder.decode(value, { stream: true });
+      for (const line of chunk.split('\n')) {
+        const trimmed = line.trim();
+        if (!trimmed.startsWith('data: ') || trimmed === 'data: [DONE]') continue;
+        try {
+          const data = JSON.parse(trimmed.slice(6));
+          const token = data.choices?.[0]?.delta?.content ?? '';
+          if (token) {
+            accumulated += token;
+            if (!controller.signal.aborted && !event.sender.isDestroyed()) {
+              event.sender.send('translate:stream-chunk', accumulated);
+            }
+          }
+        } catch {}
+      }
+    }
+  } catch (err) {
+    if (controller.signal.aborted || err?.name === 'AbortError') return '';
+    throw err;
+  } finally {
+    try { reader?.releaseLock(); } catch {}
+    if (_streamController === controller) _streamController = null;
+  }
+
+  return accumulated || text;
 });
 
 // ── IPC: Frameless window controls ────────────────────────────────────────────

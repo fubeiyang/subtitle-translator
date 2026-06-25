@@ -6,11 +6,14 @@
 // Solution: route the WebSocket through the main process (Node.js ws library)
 // which CAN set Authorization headers, and relay messages back via IPC.
 //
-// Trigger hierarchy (earliest wins, all call onFinal):
-//   1. Punctuation in new interim content  → immediate
-//   2. 300 ms pause without new words      → debounce flush
-//   3. is_final (segment boundary)         → guaranteed flush
-//   4. speech_final (utterance boundary)   → flush + full reset
+// Trigger hierarchy:
+//   1. is_final (segment boundary) → queued for cluster merge window
+//   2. speech_final (utterance boundary) → flush cluster immediately
+//   3. 500ms interim backup → queued for cluster merge window
+//
+// Cluster merge: consecutive is_final segments arriving within CLUSTER_HOLD_MS
+// (800ms) of each other are concatenated before onFinal fires, preventing
+// fragmentation from fast speech where natural pauses are < 1s.
 
 export type SourceLanguage = 'en' | 'ja' | 'ko' | 'multi';
 
@@ -28,9 +31,9 @@ export interface DeepgramService {
   isConnected: () => boolean;
 }
 
-const PUNCT_RE = /[.!?,;:]\s*$/;
-const MIN_CHUNK = 5;
-const PAUSE_MS  = 300;
+const MIN_CHUNK       = 5;    // ignore segments shorter than this
+const PAUSE_MS        = 500;  // backup flush if interim stalls
+const CLUSTER_HOLD_MS = 800;  // merge window: segments within 800ms are concatenated
 
 export function createDeepgramService(
   apiKey: string,
@@ -45,7 +48,7 @@ export function createDeepgramService(
     punctuate: 'true',
     interim_results: 'true',
     vad_events: 'true',
-    endpointing: '300',
+    endpointing: '500',
     utterance_end_ms: '1000',
   });
   if (language === 'multi') {
@@ -57,25 +60,39 @@ export function createDeepgramService(
   let connected = false;
   let closed = false;
 
-  // ── Chunking state ─────────────────────────────────────────────────────────
-  let sentBoundary = 0;
-  let currentInterim = '';
-  let pauseTimer: ReturnType<typeof setTimeout> | null = null;
+  // ── Chunking + clustering state ────────────────────────────────────────────
+  let currentInterim   = '';
+  let lastAddedSegment = ''; // dedup: prevent is_final + speech_final from double-adding
+  let lastEmitted      = ''; // dedup: prevent identical clusters from firing onFinal twice
+  let pauseTimer:   ReturnType<typeof setTimeout> | null = null;
+  let clusterBuf    = '';
+  let clusterTimer: ReturnType<typeof setTimeout> | null = null;
 
   const clearPause = () => {
     if (pauseTimer) { clearTimeout(pauseTimer); pauseTimer = null; }
   };
 
-  const flushChunk = (fullSegment: string) => {
-    const chunk = fullSegment.slice(sentBoundary).trim();
-    if (chunk.length < MIN_CHUNK) return;
-    sentBoundary = fullSegment.length;
-    callbacks.onFinal(chunk);
+  const emitCluster = () => {
+    if (clusterTimer) { clearTimeout(clusterTimer); clusterTimer = null; }
+    const text = clusterBuf.trim();
+    clusterBuf       = '';
+    lastAddedSegment = ''; // reset so next utterance can add the same words
+    if (text.length >= MIN_CHUNK && text !== lastEmitted) {
+      lastEmitted = text;
+      callbacks.onFinal(text);
+    }
   };
 
-  const resetSegment = () => {
-    sentBoundary = 0;
-    currentInterim = '';
+  // Accumulate a segment into the cluster buffer.
+  // The cluster timer resets on each addition; it fires when 800ms of silence
+  // follows the last segment, emitting the concatenated result as one onFinal call.
+  const addToCluster = (text: string) => {
+    const t = text.trim();
+    if (!t || t.length < MIN_CHUNK || t === lastAddedSegment) return;
+    lastAddedSegment = t;
+    clusterBuf = clusterBuf ? clusterBuf + ' ' + t : t;
+    if (clusterTimer) clearTimeout(clusterTimer);
+    clusterTimer = setTimeout(emitCluster, CLUSTER_HOLD_MS);
   };
 
   // ── IPC listeners ──────────────────────────────────────────────────────────
@@ -95,37 +112,32 @@ export function createDeepgramService(
     const alt = msg.channel?.alternatives?.[0];
     const transcript = alt?.transcript?.trim() ?? '';
 
+    // Natural utterance boundary → merge with any pending cluster, emit immediately
     if (msg.speech_final) {
       clearPause();
-      if (transcript) flushChunk(transcript);
-      resetSegment();
+      if (transcript) addToCluster(transcript);
+      emitCluster();
+      lastEmitted  = ''; // allow identical words in the next utterance
+      currentInterim = '';
       callbacks.onInterim('');
       return;
     }
 
+    // Segment boundary → add to cluster, wait for merge window
     if (msg.is_final) {
       clearPause();
-      if (transcript) flushChunk(transcript);
-      resetSegment();
+      if (transcript) addToCluster(transcript);
+      currentInterim = '';
       return;
     }
 
+    // Interim: show preview in main window only, arm backup flush
     if (!transcript) return;
     currentInterim = transcript;
     callbacks.onInterim(transcript);
-
-    const newPart = transcript.slice(sentBoundary).trim();
-    if (!newPart || newPart.length < MIN_CHUNK) return;
-
-    if (PUNCT_RE.test(newPart)) {
-      clearPause();
-      flushChunk(transcript);
-    } else {
-      clearPause();
-      pauseTimer = setTimeout(() => {
-        const latest = currentInterim.slice(sentBoundary).trim();
-        if (latest.length >= MIN_CHUNK) flushChunk(currentInterim);
-      }, PAUSE_MS);
+    clearPause();
+    if (transcript.length >= MIN_CHUNK) {
+      pauseTimer = setTimeout(() => addToCluster(currentInterim), PAUSE_MS);
     }
   });
 
@@ -161,7 +173,6 @@ export function createDeepgramService(
         clearPause();
         callbacks.onError(result.message ?? 'Deepgram 连接失败');
       }
-      // success=true → 'open' status arrives via onDeepgramStatus
     }
   );
 
@@ -174,6 +185,7 @@ export function createDeepgramService(
     close() {
       closed = true;
       clearPause();
+      if (clusterTimer) { clearTimeout(clusterTimer); clusterTimer = null; }
       window.electronAPI.deepgramClose();
       connected = false;
       cleanupMessage?.();

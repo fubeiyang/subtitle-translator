@@ -28,6 +28,20 @@ contextBridge.exposeInMainWorld('electronAPI', {
   translate: (url) => ipcRenderer.invoke('translate:request', url),
   translateClaude: (text, contextZh, apiKey, baseUrl, model) =>
     ipcRenderer.invoke('translate:claude', { text, contextZh, apiKey, baseUrl, model }),
+  translateClaudeStream: (text, contextZh, apiKey, baseUrl, model) =>
+    ipcRenderer.invoke('translate:claude:stream', { text, contextZh, apiKey, baseUrl, model }),
+  onTranslateStreamChunk: (cb) => {
+    const handler = (_event, partialZh) => cb(partialZh);
+    ipcRenderer.on('translate:stream-chunk', handler);
+    return () => ipcRenderer.removeListener('translate:stream-chunk', handler);
+  },
+
+  // Overlay display settings (font size, opacity) — pushed from main after save
+  onOverlaySettings: (cb) => {
+    const handler = (_event, settings) => cb(settings);
+    ipcRenderer.on('overlay:settings', handler);
+    return () => ipcRenderer.removeListener('overlay:settings', handler);
+  },
 
   // Frameless window controls
   minimizeWindow: () => ipcRenderer.send('window:minimize'),
